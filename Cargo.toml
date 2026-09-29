@@ -1,0 +1,14 @@
+[package]
+name = "ossgui"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+dirs = "7.0.0"
+gpui-fps = "0.7.0"
+gpui-kit = "^0.7"
+rust-embed = "8.12.0"
+schemars = "1.2.2"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
