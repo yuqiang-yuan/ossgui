@@ -14,10 +14,11 @@ use gpui_kit::{
 use crate::{assets::AppAssets, globals::APP_ID, main_view::MainView, settings::AppSettings};
 
 fn main() {
+    dotenvy::dotenv().ok();
     let app = gpui_kit::application().with_assets(AppAssets);
     app.run(|cx| {
         gpui_kit::init(cx);
-        cx.set_app_identity(APP_ID, "Erydian");
+        cx.set_app_identity(APP_ID, "Ossgui");
 
         let settings = AppSettings::load();
 

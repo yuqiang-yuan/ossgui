@@ -132,6 +132,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "ali-oss-rs"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "03cec8e13ee2384c53b30df7fd79f1083cf1eb364599d292bfa19d66f3807606"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "bytes",
+ "chrono",
+ "futures",
+ "hex",
+ "hmac",
+ "log",
+ "md5",
+ "mime_guess",
+ "quick-xml 0.37.5",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+ "url",
+ "urlencoding",
+]
+
+[[package]]
 name = "aligned"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -926,7 +955,7 @@ dependencies = [
  "cocoa-foundation 0.1.2",
  "core-foundation 0.9.4",
  "core-graphics 0.23.2",
- "foreign-types",
+ "foreign-types 0.5.0",
  "libc",
  "objc",
 ]
@@ -942,7 +971,7 @@ dependencies = [
  "cocoa-foundation 0.2.1",
  "core-foundation 0.10.1",
  "core-graphics 0.24.0",
- "foreign-types",
+ "foreign-types 0.5.0",
  "libc",
  "objc",
 ]
@@ -1098,7 +1127,7 @@ dependencies = [
  "bitflags 1.3.2",
  "core-foundation 0.9.4",
  "core-graphics-types 0.1.3",
- "foreign-types",
+ "foreign-types 0.5.0",
  "libc",
 ]
 
@@ -1111,7 +1140,7 @@ dependencies = [
  "bitflags 2.13.2",
  "core-foundation 0.10.1",
  "core-graphics-types 0.2.0",
- "foreign-types",
+ "foreign-types 0.5.0",
  "libc",
 ]
 
@@ -1124,7 +1153,7 @@ dependencies = [
  "bitflags 2.13.2",
  "core-foundation 0.9.4",
  "core-graphics-types 0.1.3",
- "foreign-types",
+ "foreign-types 0.5.0",
  "libc",
 ]
 
@@ -1171,7 +1200,7 @@ checksum = "a593227b66cbd4007b2a050dfdd9e1d1318311409c8d600dc82ba1b15ca9c130"
 dependencies = [
  "core-foundation 0.10.1",
  "core-graphics 0.24.0",
- "foreign-types",
+ "foreign-types 0.5.0",
  "libc",
 ]
 
@@ -1478,6 +1507,12 @@ checksum = "d4b8a88685455ed29a21542a33abd9cb6510b6b129abadabdcef0f4c55bc8f61"
 dependencies = [
  "litrs",
 ]
+
+[[package]]
+name = "dotenvy"
+version = "0.15.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1aaf95b3e5c8f23aa320147307562d361db0ae0d51242340f558153b4eb2439b"
 
 [[package]]
 name = "downcast-rs"
@@ -1881,12 +1916,21 @@ dependencies = [
 
 [[package]]
 name = "foreign-types"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f6f339eb8adc052cd2ca78910fda869aefa38d22d5cb648e6485e4d3fc06f3b1"
+dependencies = [
+ "foreign-types-shared 0.1.1",
+]
+
+[[package]]
+name = "foreign-types"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d737d9aa519fb7b749cbc3b962edcf310a8dd1f4b67c91c4f83975dbdd17d965"
 dependencies = [
  "foreign-types-macros",
- "foreign-types-shared",
+ "foreign-types-shared 0.3.1",
 ]
 
 [[package]]
@@ -1899,6 +1943,12 @@ dependencies = [
  "quote",
  "syn 3.0.6",
 ]
+
+[[package]]
+name = "foreign-types-shared"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "00b0228411908ca8685dba7fc2cdd70ec9990a6e753e89b6ac91a84c40fbaf4b"
 
 [[package]]
 name = "foreign-types-shared"
@@ -2470,7 +2520,7 @@ dependencies = [
  "core-video",
  "derive_more",
  "etagere",
- "foreign-types",
+ "foreign-types 0.5.0",
  "gpui-pre",
  "image",
  "log",
@@ -2588,7 +2638,7 @@ dependencies = [
  "core-text",
  "ctor",
  "dispatch2",
- "foreign-types",
+ "foreign-types 0.5.0",
  "futures",
  "gpui-pre",
  "gpui-pre-apple",
@@ -3156,11 +3206,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "hyper-tls"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "70206fc6890eaca9fde8a0bf71caa2ddfc9fe045ac9e5c70df101a7dbde866e0"
+dependencies = [
+ "bytes",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "native-tls",
+ "tokio",
+ "tokio-native-tls",
+ "tower-service",
+]
+
+[[package]]
 name = "hyper-util"
 version = "0.1.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ddc03d96684f9226b8a787cdb71488417b53ab5ea8fdb1dac946cb9431cc8bff"
 dependencies = [
+ "base64 0.23.1",
  "bytes",
  "futures-channel",
  "futures-util",
@@ -3168,7 +3235,9 @@ dependencies = [
  "http-body",
  "httparse",
  "hyper",
+ "ipnet",
  "libc",
+ "percent-encoding",
  "pin-project-lite",
  "socket2",
  "tokio",
@@ -3928,6 +3997,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "md5"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "490cc448043f947bae3cbee9c203358d62dbee0db12107a74be5c30ccfd09771"
+
+[[package]]
 name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3960,7 +4035,7 @@ dependencies = [
  "bitflags 2.13.2",
  "block",
  "core-graphics-types 0.2.0",
- "foreign-types",
+ "foreign-types 0.5.0",
  "log",
  "objc",
  "paste",
@@ -4060,6 +4135,23 @@ dependencies = [
  "spirv",
  "thiserror 2.0.21",
  "unicode-ident",
+]
+
+[[package]]
+name = "native-tls"
+version = "0.2.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "465500e14ea162429d264d44189adc38b199b62b1c21eea9f69e4b73cb03bbf2"
+dependencies = [
+ "libc",
+ "log",
+ "openssl",
+ "openssl-probe",
+ "openssl-sys",
+ "schannel",
+ "security-framework",
+ "security-framework-sys",
+ "tempfile",
 ]
 
 [[package]]
@@ -4747,10 +4839,47 @@ dependencies = [
 ]
 
 [[package]]
+name = "openssl"
+version = "0.10.81"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77823a27f0babb03091cb9ed9ef80af3b39dbc82f97e8fa530374b7dafd87a45"
+dependencies = [
+ "bitflags 2.13.2",
+ "cfg-if",
+ "foreign-types 0.3.2",
+ "libc",
+ "openssl-macros",
+ "openssl-sys",
+]
+
+[[package]]
+name = "openssl-macros"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a948666b637a0f465e8564c73e89d4dde00d72d4d473cc972f390fc3dcee7d9c"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "openssl-probe"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
+
+[[package]]
+name = "openssl-sys"
+version = "0.9.117"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b47e7e6bb2c38cd930d25a23b40fa52e068c10e85f3e03a7f5ba5aaca5713695"
+dependencies = [
+ "cc",
+ "libc",
+ "pkg-config",
+ "vcpkg",
+]
 
 [[package]]
 name = "option-ext"
@@ -4781,14 +4910,17 @@ dependencies = [
 name = "ossgui"
 version = "0.1.0"
 dependencies = [
+ "ali-oss-rs",
  "anyhow",
  "dirs 7.0.0",
+ "dotenvy",
  "gpui-fps",
  "gpui-kit",
  "rust-embed",
  "schemars",
  "serde",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -5219,6 +5351,15 @@ checksum = "a993555f31e5a609f617c12db6250dedcac1b0a85076912c436e6fc9b2c8e6a3"
 
 [[package]]
 name = "quick-xml"
+version = "0.37.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "331e97a1af0bf59823e6eadffe373d7b27f485be8748f71471c662c1f269b7fb"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
+name = "quick-xml"
 version = "0.41.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e660451e55124f798a69a5af3f49ccfbefbd41910eefd25caf2393e1f3473ec1"
@@ -5609,6 +5750,45 @@ name = "renderdoc-sys"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19b30a45b0cd0bcca8037f3d0dc3421eaf95327a17cad11964fb8179b4fc4832"
+
+[[package]]
+name = "reqwest"
+version = "0.12.28"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
+dependencies = [
+ "base64 0.22.1",
+ "bytes",
+ "futures-core",
+ "futures-util",
+ "http",
+ "http-body",
+ "http-body-util",
+ "hyper",
+ "hyper-tls",
+ "hyper-util",
+ "js-sys",
+ "log",
+ "native-tls",
+ "percent-encoding",
+ "pin-project-lite",
+ "rustls-pki-types",
+ "serde",
+ "serde_json",
+ "serde_urlencoded",
+ "sync_wrapper",
+ "tokio",
+ "tokio-native-tls",
+ "tokio-util",
+ "tower",
+ "tower-http",
+ "tower-service",
+ "url",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "wasm-streams",
+ "web-sys",
+]
 
 [[package]]
 name = "resvg"
@@ -6872,9 +7052,33 @@ dependencies = [
  "bytes",
  "libc",
  "mio",
+ "parking_lot",
  "pin-project-lite",
+ "signal-hook-registry",
  "socket2",
+ "tokio-macros",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "tokio-macros"
+version = "2.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "78773a2a397f451582ce068015985c33193cf6dea8b74d2a639fe457b2f07b0e"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.6",
+]
+
+[[package]]
+name = "tokio-native-tls"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbae76ab933c85776efabc971569dd6119c580d8f5d448769dec1764bf796ef2"
+dependencies = [
+ "native-tls",
+ "tokio",
 ]
 
 [[package]]
@@ -7018,6 +7222,24 @@ dependencies = [
  "tokio",
  "tower-layer",
  "tower-service",
+]
+
+[[package]]
+name = "tower-http"
+version = "0.6.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4cfcf7e2740e6fc6d4d688b4ef00650406bb94adf4731e43c096c3a19fe40840"
+dependencies = [
+ "bitflags 2.13.2",
+ "bytes",
+ "futures-util",
+ "http",
+ "http-body",
+ "pin-project-lite",
+ "tower",
+ "tower-layer",
+ "tower-service",
+ "url",
 ]
 
 [[package]]
@@ -7236,6 +7458,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "urlencoding"
+version = "2.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "daf8dba3b7eb870caf1ddeed7bc9d2a049f3cfdfae7cb521b087cc33ae4c49da"
+
+[[package]]
 name = "usvg"
 version = "0.45.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7366,6 +7594,12 @@ dependencies = [
  "sval_ref",
  "sval_serde",
 ]
+
+[[package]]
+name = "vcpkg"
+version = "0.2.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 
 [[package]]
 name = "version_check"
@@ -7597,7 +7831,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "338e30461b3a2b67d70eb30a6d89f8e0c93a833e07d2ae89085cd070c4a00ac0"
 dependencies = [
  "proc-macro2",
- "quick-xml",
+ "quick-xml 0.41.0",
  "quote",
 ]
 
@@ -8545,7 +8779,7 @@ checksum = "a6c2ad15e0e922856ee89afe862b8992334bbe7953adad56cd1199358cb30566"
 dependencies = [
  "bitflags 2.13.2",
  "libc",
- "quick-xml",
+ "quick-xml 0.41.0",
  "x11",
 ]
 
