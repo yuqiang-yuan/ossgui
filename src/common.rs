@@ -6,7 +6,7 @@ pub fn tokio_runtime() -> &'static tokio::runtime::Runtime {
     static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
     RUNTIME.get_or_init(|| {
         tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(4) // 纯网络等待，1 个 worker 够；CPU 任务多再加
+            .worker_threads(2) // 纯网络等待，1 个 worker 够；CPU 任务多再加
             .enable_all()
             .build()
             .expect("failed to start tokio runtime")

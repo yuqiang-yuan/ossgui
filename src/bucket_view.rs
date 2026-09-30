@@ -1,14 +1,29 @@
 use std::sync::Arc;
 
 use ali_oss_rs::{
-    Client, bucket::BucketOperations, bucket_common::{BucketDetail, BucketSummary, ListBucketsOptions, ListBucketsResult}, common::StorageClass,
+    Client,
+    bucket::BucketOperations,
+    bucket_common::{BucketDetail, BucketSummary, ListBucketsOptions, ListBucketsResult},
+    common::StorageClass,
 };
 use gpui_kit::{
-    App, AppContext, Context, Div, Entity, Hsla, IntoElement, ParentElement, Render, Role::DescriptionList, Styled, Subscription, Task, WeakEntity, Window, assets::IconName, base::{
-        Disableable, Placement, StyledExt, input::{InputEvent, InputState},
-    }, component::{
-        ActiveTheme, Icon, Sizable, WindowExt, button::{Button, ButtonVariants}, input::Input, notification::NotificationType, progress::ProgressCircle, table::{Column, ColumnSort, DataTable, TableDelegate, TableState},
-    }, div, prelude::FluentBuilder, px,
+    App, AppContext, Context, Div, Entity, Hsla, IntoElement, ParentElement, Render,
+    Styled, Subscription, Task, WeakEntity, Window,
+    assets::IconName,
+    base::{
+        Disableable, Placement, StyledExt,
+        input::{InputEvent, InputState},
+    },
+    component::{
+        ActiveTheme, Icon, Sizable, WindowExt,
+        button::{Button, ButtonVariants},
+        input::Input,
+        notification::NotificationType,
+        progress::ProgressCircle,
+        table::{Column, ColumnSort, DataTable, TableDelegate, TableState},
+    },
+    div,
+    px,
 };
 
 use crate::common::{AbortOnDrop, LoadState, format_datetime, tokio_runtime};
@@ -22,7 +37,7 @@ pub struct BucketTableDelegate {
     loading: bool,
     columns: Vec<Column>,
     search: String,
-
+    current_sort: Option<(usize, ColumnSort)>,
     bucket_list_panel: WeakEntity<BucketListPanel>,
 }
 
@@ -56,6 +71,7 @@ impl BucketTableDelegate {
                 Column::new("actions", "").width(px(60.0)).movable(false),
             ],
             search: String::new(),
+            current_sort: None,
         }
     }
 
@@ -63,15 +79,13 @@ impl BucketTableDelegate {
     pub fn set_rows(&mut self, rows: Vec<BucketSummary>) {
         self.rows = rows;
         self.loading = false;
-        let s = self.search.clone();
-        self.apply_filter(s.as_str());
+        self.recompute();
     }
 
     pub fn extend_rows(&mut self, rows: Vec<BucketSummary>) {
         self.rows.extend(rows);
         self.loading = false;
-        let s = self.search.clone();
-        self.apply_filter(s.as_str());
+        self.recompute();
     }
 
     pub fn row(&self, ix: usize) -> Option<&BucketSummary> {
@@ -81,16 +95,36 @@ impl BucketTableDelegate {
             .flatten()
     }
 
-    fn apply_filter(&mut self, needle: &str) {
-        self.search = needle.to_string();
-        let s = self.search.trim().to_ascii_lowercase();
+    /// 唯一的派生状态重算入口。
+    /// filtered_indexes = f(rows, search, current_sort)，任何输入变化后调用一次。
+    fn recompute(&mut self) {
+        let needle = self.search.trim().to_ascii_lowercase();
         self.filtered_indexes = self
             .rows
             .iter()
             .enumerate()
-            .filter(|(_, b)| s.is_empty() || b.name.contains(&s))
+            .filter(|(_, b)| needle.is_empty() || b.name.to_ascii_lowercase().contains(&needle))
             .map(|(ix, _)| ix)
             .collect();
+
+        let Some((col_ix, sort)) = self.current_sort else {
+            return;                     // 没有排序 → 自然序，完事
+        };
+        let desc = matches!(sort, ColumnSort::Descending);
+        self.filtered_indexes.sort_by(|&a, &b| {
+            let o = match col_ix {
+                1 => self.rows[a].name.cmp(&self.rows[b].name),
+                2 => self.rows[a].region.cmp(&self.rows[b].region),
+                3 => self.rows[a].creation_date.cmp(&self.rows[b].creation_date),
+                _ => std::cmp::Ordering::Equal,
+            };
+            if desc { o.reverse() } else { o }
+        });
+    }
+
+    fn apply_filter(&mut self, needle: &str) {
+        self.search = needle.to_string();
+        self.recompute();
     }
 }
 
@@ -124,17 +158,9 @@ impl TableDelegate for BucketTableDelegate {
         _window: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
-        let Some(row) = self
-            .filtered_indexes
-            .get(row_ix)
-            .map(|ix| self.rows.get(*ix))
-            .flatten()
-        else {
+        let Some(row) = self.row(row_ix) else {
             return div().into_any_element();
         };
-
-        let panel = self.bucket_list_panel.clone();
-        let name = row.name.clone();
 
         match col_ix {
             0 => div()
@@ -164,24 +190,30 @@ impl TableDelegate for BucketTableDelegate {
             4 => div()
                 .child(row.storage_class.to_string())
                 .into_any_element(),
-            5 => div()
-                .h_full()
-                .h_flex()
-                .items_center()
-                .justify_center()
-                .gap_1()
-                .child(
-                    Button::new(format!("bucket-{}-info-button", row.name))
-                        .tooltip("Bucket detail")
-                        .icon(IconName::Info)
-                        .text()
-                        .rounded_full()
-                        .compact()
-                        .on_click(move |_, window, cx| {
-                            panel.update(cx, |panel, cx| panel.show_bucket_detail(&name, window, cx)).ok();
-                        }),
-                )
-                .into_any_element(),
+            5 => {
+                let panel = self.bucket_list_panel.clone();
+                let name = row.name.clone();
+                div()
+                    .h_full()
+                    .h_flex()
+                    .items_center()
+                    .justify_center()
+                    .gap_1()
+                    .child(
+                        Button::new(format!("bucket-{}-info-button", row.name))
+                            .tooltip("Bucket detail")
+                            .icon(IconName::Info)
+                            .text()
+                            .rounded_full()
+                            .compact()
+                            .on_click(move |_, window, cx| {
+                                panel
+                                    .update(cx, |panel, cx| panel.show_bucket_detail(&name, window, cx))
+                                    .ok();
+                            }),
+                    )
+                    .into_any_element()
+            },
             _ => div().into_any_element(),
         }
     }
@@ -191,25 +223,10 @@ impl TableDelegate for BucketTableDelegate {
         col_ix: usize,
         sort: ColumnSort,
         _: &mut Window,
-        cx: &mut Context<TableState<Self>>,
+        _: &mut Context<TableState<Self>>,
     ) {
-        self.rows.sort_by(|a, b| match col_ix {
-            1 => a.name.cmp(&b.name),
-            2 => a.region.cmp(&b.region),
-            3 => a.creation_date.cmp(&b.creation_date),
-            4 => a
-                .storage_class
-                .to_string()
-                .cmp(&b.storage_class.to_string()),
-            _ => std::cmp::Ordering::Equal,
-        });
-
-        if matches!(sort, ColumnSort::Descending) {
-            self.rows.reverse();
-        }
-
-        self.apply_filter(&self.search.clone());
-        cx.notify();
+        self.current_sort = (!matches!(sort, ColumnSort::Default)).then_some((col_ix, sort));
+        self.recompute();
     }
 
     fn render_th(
@@ -229,11 +246,9 @@ impl TableDelegate for BucketTableDelegate {
 
 pub struct BucketListPanel {
     ossclient: Arc<Client>,
-    buckets_load: LoadState,
+    load_state: LoadState,
     buckets_state: Entity<TableState<BucketTableDelegate>>,
     load_task: Task<()>,
-    get_detail_task: Task<()>,
-    get_detail_load: LoadState,
     search_state: Entity<InputState>,
     is_truncated: bool,
     next_marker: Option<String>,
@@ -252,20 +267,20 @@ impl BucketListPanel {
             vec![cx.subscribe(
                 &search_state,
                 |view, state, event: &InputEvent, cx| match event {
-                    InputEvent::PressEnter { .. } => {
+                    InputEvent::Change => {
                         let s = state.read(cx).value();
                         view.buckets_state.update(cx, |state, cx| {
                             state.delegate_mut().apply_filter(&s);
                             cx.notify();
                         });
-                    }
-                    _ => {}
+                    },
+                    _ => {},
                 },
             )];
         let this_weak = cx.weak_entity();
         let this = Self {
             ossclient,
-            buckets_load: LoadState::Idle,
+            load_state: LoadState::Idle,
             buckets_state: cx.new(|cx| {
                 TableState::new(BucketTableDelegate::new(this_weak), window, cx)
                     .row_selectable(true)
@@ -273,8 +288,6 @@ impl BucketListPanel {
                     .cell_selectable(false)
             }),
             load_task: Task::ready(()), // 占位，load_buckets 里会替换
-            get_detail_task: Task::ready(()),
-            get_detail_load: LoadState::Idle,
             search_state,
             is_truncated: false,
             next_marker: None,
@@ -290,11 +303,11 @@ impl BucketListPanel {
     ///
     /// if `extend_mode` is set to `true`, new data will be appended into existing data
     fn load_buckets(&mut self, extend_mode: bool, cx: &mut Context<Self>) {
-        if matches!(self.buckets_load, LoadState::Loading) {
+        if matches!(self.load_state, LoadState::Loading) {
             return;
         }
 
-        self.buckets_load = LoadState::Loading;
+        self.load_state = LoadState::Loading;
         cx.notify();
 
         let client = self.ossclient.clone();
@@ -350,11 +363,11 @@ impl BucketListPanel {
 
                             cx.notify();
                         });
-                        view.buckets_load = LoadState::Loaded;
+                        view.load_state = LoadState::Loaded;
                     }
                     Err(e) => {
                         let msg = e.to_string();
-                        view.buckets_load = LoadState::Failed;
+                        view.load_state = LoadState::Failed;
                         window.push_notification((NotificationType::Error, msg), cx);
                     }
                 }
@@ -364,22 +377,22 @@ impl BucketListPanel {
         });
     }
 
-    fn show_bucket_detail(&mut self, bucket_name: &str, window: &mut Window, cx: &mut Context<Self>) {
-        if matches!(self.get_detail_load, LoadState::Loading) {
-            return;
-        }
-
+    fn show_bucket_detail(
+        &mut self,
+        bucket_name: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let client = self.ossclient.clone();
         let bucket_name = bucket_name.to_string();
-        let detail_view = cx.new(|cx| BucketDetailPanel::new(client, bucket_name.clone(), window, cx));
+        let detail_view =
+            cx.new(|cx| BucketDetailPanel::new(client, bucket_name.clone(), window, cx));
 
         window.open_sheet_at(Placement::Right, cx, move |sheet, _, _| {
             sheet
                 .p_0()
                 .title(div().text_lg().child(bucket_name.clone()))
-                .child(
-                    detail_view.clone()
-                )
+                .child(detail_view.clone())
         });
     }
 }
@@ -406,7 +419,7 @@ impl Render for BucketListPanel {
                     .child(
                         Button::new("load-buckets-button")
                             .label("Refresh")
-                            .loading(matches!(self.buckets_load, LoadState::Loading))
+                            .loading(matches!(self.load_state, LoadState::Loading))
                             .icon(IconName::RefreshCw)
                             .on_click(cx.listener(|view, _, _, cx| {
                                 view.load_buckets(false, cx);
@@ -415,7 +428,7 @@ impl Render for BucketListPanel {
                     .child(
                         Button::new("load-more-buckets-button")
                             .label("Load more")
-                            .loading(matches!(self.buckets_load, LoadState::Loading))
+                            .loading(matches!(self.load_state, LoadState::Loading))
                             .icon(IconName::ArrowDownToLine)
                             .disabled(!self.is_truncated)
                             .tooltip(if self.is_truncated {
@@ -440,17 +453,22 @@ struct BucketDetailPanel {
     ossclient: Arc<Client>,
     bucket_name: String,
     load_task: Task<()>,
-    detail_load: LoadState,
+    load_state: LoadState,
     bucket_detail: Option<BucketDetail>,
 }
 
 impl BucketDetailPanel {
-    fn new(ossclient: Arc<Client>, bucket_name: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(
+        ossclient: Arc<Client>,
+        bucket_name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let this = Self {
             ossclient,
             bucket_name,
             load_task: Task::ready(()),
-            detail_load: LoadState::Idle,
+            load_state: LoadState::Idle,
             bucket_detail: None,
         };
 
@@ -460,11 +478,11 @@ impl BucketDetailPanel {
     }
 
     fn load_detail(&mut self, cx: &mut Context<Self>) {
-        if matches!(self.detail_load, LoadState::Loading) {
+        if matches!(self.load_state, LoadState::Loading) {
             return;
         }
 
-        self.detail_load = LoadState::Loading;
+        self.load_state = LoadState::Loading;
         cx.notify();
 
         let client = self.ossclient.clone();
@@ -485,48 +503,58 @@ impl BucketDetailPanel {
                 match result {
                     Ok(d) => {
                         view.bucket_detail = Some(d);
-                        view.detail_load = LoadState::Loaded;
-                    },
+                        view.load_state = LoadState::Loaded;
+                    }
                     Err(e) => {
                         window.push_notification((NotificationType::Error, e.to_string()), cx);
-                        view.detail_load = LoadState::Failed;
-                    },
+                        view.load_state = LoadState::Failed;
+                    }
                 }
 
                 cx.notify();
-            }).ok();
+            })
+            .ok();
         });
     }
 
     fn render_detail(&self) -> Div {
         if let Some(d) = &self.bucket_detail {
-            div()
-                .child(
-                    gpui_kit::component::description_list::DescriptionList::horizontal()
-                        .columns(1)
-                        .item("Name", d.name.as_str(), 1)
-                        .item("Location", d.location.as_str(), 1)
-                        .item("Storage", d.storage_class.to_string(), 1)
-                        .item("Created at", format_datetime(&d.creation_date), 1)
-                        .item("Acl", d.access_control_list.iter().map(|acl| acl.to_string()).collect::<Vec<_>>().join("\n"), 1)
-                )
+            div().child(
+                gpui_kit::component::description_list::DescriptionList::horizontal()
+                    .columns(1)
+                    .item("Name", d.name.as_str(), 1)
+                    .item("Location", d.location.as_str(), 1)
+                    .item("Storage", d.storage_class.to_string(), 1)
+                    .item("Created at", format_datetime(&d.creation_date), 1)
+                    .item(
+                        "Acl",
+                        d.access_control_list
+                            .iter()
+                            .map(|acl| acl.to_string())
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                        1,
+                    ),
+            )
         } else {
             div().text_center().child("Something went wrong...")
         }
-
     }
 }
 
 impl Render for BucketDetailPanel {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .size_full()
             .border_t_1()
             .border_color(cx.theme().border)
             .p_4()
-            .child(match self.detail_load {
-                LoadState::Idle => div().child("Idle"),
-                LoadState::Loading => div().h_flex().justify_center().child(ProgressCircle::new("bucket-detail-loading")),
+            .child(match self.load_state {
+                LoadState::Idle => div(),
+                LoadState::Loading => div()
+                    .h_flex()
+                    .justify_center()
+                    .child(ProgressCircle::new("bucket-detail-loading")),
                 LoadState::Loaded => self.render_detail(),
                 LoadState::Failed => div().child("Failed"),
             })

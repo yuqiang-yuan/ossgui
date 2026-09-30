@@ -40,7 +40,7 @@ impl MainView {
         Self {
             focus_handle,
             menubar: AppMenuBar::new(cx),
-            show_fps: false,
+            show_fps: true,
             bucket_list_panel: cx.new(|cx| BucketListPanel::new(ossclient.clone(), window, cx)),
         }
     }
