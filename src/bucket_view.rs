@@ -7,8 +7,8 @@ use ali_oss_rs::{
     common::StorageClass,
 };
 use gpui_kit::{
-    App, AppContext, Context, Div, Entity, Hsla, IntoElement, ParentElement, Render,
-    Styled, Subscription, Task, WeakEntity, Window,
+    App, AppContext, Context, Div, Entity, Hsla, IntoElement, ParentElement, Render, Styled,
+    Subscription, Task, WeakEntity, Window,
     assets::IconName,
     base::{
         Disableable, Placement, StyledExt,
@@ -22,11 +22,13 @@ use gpui_kit::{
         progress::ProgressCircle,
         table::{Column, ColumnSort, DataTable, TableDelegate, TableState},
     },
-    div,
-    px,
+    div, px,
 };
 
-use crate::common::{AbortOnDrop, LoadState, format_datetime, tokio_runtime};
+use crate::{
+    common::{AbortOnDrop, LoadState, format_datetime, tokio_runtime},
+    main_view::MainView,
+};
 
 pub struct BucketTableDelegate {
     /// This is all data
@@ -108,7 +110,7 @@ impl BucketTableDelegate {
             .collect();
 
         let Some((col_ix, sort)) = self.current_sort else {
-            return;                     // 没有排序 → 自然序，完事
+            return; // 没有排序 → 自然序，完事
         };
         let desc = matches!(sort, ColumnSort::Descending);
         self.filtered_indexes.sort_by(|&a, &b| {
@@ -167,22 +169,32 @@ impl TableDelegate for BucketTableDelegate {
                 .text_right()
                 .child(format!("{}", row_ix + 1))
                 .into_any_element(),
-            1 => div()
-                .h_flex()
-                .items_baseline()
-                .gap_1()
-                .child(
-                    Icon::default()
-                        .path("icons/bucket.svg")
-                        .size_4()
-                        .text_color(get_color(row, cx)),
-                )
-                .child(
-                    Button::new(format!("bucket-{}-button", row.name))
-                        .text()
-                        .label(row.name.clone()),
-                )
-                .into_any_element(),
+            1 => {
+                let panel = self.bucket_list_panel.clone();
+                let name = row.name.clone();
+                div()
+                    .h_flex()
+                    .items_baseline()
+                    .gap_1()
+                    .child(
+                        Icon::default()
+                            .path("icons/bucket.svg")
+                            .size_4()
+                            .text_color(get_color(row, cx)),
+                    )
+                    .child(
+                        Button::new(format!("bucket-{}-button", row.name))
+                            .text()
+                            .label(row.name.clone())
+                            .on_click(move |_, _, cx| {
+                                println!("bucket: {name} is clicked");
+                                panel
+                                    .update(cx, |panel, cx| panel.goto_bucket(&name, cx))
+                                    .ok();
+                            }),
+                    )
+                    .into_any_element()
+            }
             2 => div().child(row.region.clone()).into_any_element(),
             3 => div()
                 .child(format_datetime(&row.creation_date))
@@ -208,12 +220,14 @@ impl TableDelegate for BucketTableDelegate {
                             .compact()
                             .on_click(move |_, window, cx| {
                                 panel
-                                    .update(cx, |panel, cx| panel.show_bucket_detail(&name, window, cx))
+                                    .update(cx, |panel, cx| {
+                                        panel.show_bucket_detail(&name, window, cx)
+                                    })
                                     .ok();
                             }),
                     )
                     .into_any_element()
-            },
+            }
             _ => div().into_any_element(),
         }
     }
@@ -245,6 +259,7 @@ impl TableDelegate for BucketTableDelegate {
 }
 
 pub struct BucketListPanel {
+    main_view: WeakEntity<MainView>,
     ossclient: Arc<Client>,
     load_state: LoadState,
     buckets_state: Entity<TableState<BucketTableDelegate>>,
@@ -256,15 +271,20 @@ pub struct BucketListPanel {
 }
 
 impl BucketListPanel {
-    pub fn new(ossclient: Arc<Client>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        main_view: WeakEntity<MainView>,
+        ossclient: Arc<Client>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let search_state = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("Search")
                 .clean_on_escape()
         });
 
-        let _subs =
-            vec![cx.subscribe(
+        let search_sub =
+            cx.subscribe(
                 &search_state,
                 |view, state, event: &InputEvent, cx| match event {
                     InputEvent::Change => {
@@ -273,12 +293,14 @@ impl BucketListPanel {
                             state.delegate_mut().apply_filter(&s);
                             cx.notify();
                         });
-                    },
-                    _ => {},
+                    }
+                    _ => {}
                 },
-            )];
+            );
+
         let this_weak = cx.weak_entity();
         let this = Self {
+            main_view,
             ossclient,
             load_state: LoadState::Idle,
             buckets_state: cx.new(|cx| {
@@ -291,7 +313,7 @@ impl BucketListPanel {
             search_state,
             is_truncated: false,
             next_marker: None,
-            _subs,
+            _subs: vec![search_sub],
         };
 
         cx.on_next_frame(window, |this, _, cx| this.load_buckets(false, cx));
@@ -394,6 +416,16 @@ impl BucketListPanel {
                 .title(div().text_lg().child(bucket_name.clone()))
                 .child(detail_view.clone())
         });
+    }
+
+    fn goto_bucket(&self, bucket_name: &str, cx: &mut Context<Self>) {
+        self.main_view
+            .update(cx, |main_view, cx| {
+                main_view.browse_bucket(bucket_name.to_string(), cx);
+            })
+            .ok();
+
+        cx.notify();
     }
 }
 

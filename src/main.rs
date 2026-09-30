@@ -5,6 +5,7 @@ mod main_view;
 mod actions;
 mod common;
 mod bucket_view;
+mod object_view;
 
 #[cfg(target_os = "linux")]
 use gpui_kit::WindowDecorations;

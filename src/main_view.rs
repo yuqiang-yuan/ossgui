@@ -8,13 +8,22 @@ use gpui_kit::{
     }, div, prelude::FluentBuilder, px,
 };
 
-use crate::{actions::{AboutAction, QuitAction}, bucket_view::BucketListPanel};
+use crate::{actions::{AboutAction, QuitAction}, bucket_view::BucketListPanel, object_view::ObjectListPanel};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Scene {
+    Buckets,
+    Objects,
+}
 
 pub struct MainView {
     focus_handle: FocusHandle,
     menubar: Entity<AppMenuBar>,
     show_fps: bool,
-    bucket_list_panel: Entity<BucketListPanel>
+    bucket_list_panel: Entity<BucketListPanel>,
+    object_list_panel: Entity<ObjectListPanel>,
+    bucket_name: Option<String>,
+    scene: Scene,
 }
 
 impl MainView {
@@ -36,13 +45,24 @@ impl MainView {
         }
 
         let ossclient = Arc::new(Client::from_env());
-
+        let this_weak = cx.weak_entity();
         Self {
             focus_handle,
             menubar: AppMenuBar::new(cx),
             show_fps: true,
-            bucket_list_panel: cx.new(|cx| BucketListPanel::new(ossclient.clone(), window, cx)),
+            bucket_list_panel: cx.new(|cx| BucketListPanel::new(this_weak.clone(), ossclient.clone(), window, cx)),
+            object_list_panel: cx.new(|cx| ObjectListPanel::new(this_weak.clone(), ossclient.clone(), window, cx)),
+            bucket_name: None,
+            scene: Scene::Buckets,
         }
+    }
+
+    pub fn browse_bucket(&mut self, bucket_name: String, cx: &mut Context<Self>) {
+        println!("Going to bucket: {}", bucket_name);
+        self.bucket_name = Some(bucket_name);
+        self.scene = Scene::Objects;
+
+        cx.notify();
     }
 }
 
@@ -73,11 +93,19 @@ impl Render for MainView {
                     .child(
                         div()
                             .w_16()
+                            .flex_shrink_0()
                             .h_full()
                             .border_r_1()
                             .border_color(cx.theme().border),
                     )
-                    .child(div().size_full().p_2().child(self.bucket_list_panel.clone()))
+                    .child(
+                        div()
+                            .size_full()
+                            .p_2()
+                            .when(matches!(self.scene, Scene::Buckets), |div| div.child(self.bucket_list_panel.clone()))
+                            .when(matches!(self.scene, Scene::Objects), |div| div.child(self.object_list_panel.clone()))
+
+                    )
                     .when(self.show_fps, |this| this.child(fps_monitor(window, cx))),
             )
             .child(StatusBar::new().left("Ready"))
