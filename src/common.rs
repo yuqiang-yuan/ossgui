@@ -13,11 +13,12 @@ pub fn tokio_runtime() -> &'static tokio::runtime::Runtime {
     })
 }
 
+#[derive(Debug, Clone, Copy)]
 pub enum LoadState {
     Idle,
     Loading,
     Loaded,
-    Failed(String),
+    Failed,
 }
 
 /// AbortHandle 在 drop 时中止对应的 tokio 任务
