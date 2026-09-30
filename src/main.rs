@@ -3,7 +3,8 @@ mod settings;
 mod globals;
 mod main_view;
 mod actions;
-
+mod common;
+mod bucket_view;
 
 #[cfg(target_os = "linux")]
 use gpui_kit::WindowDecorations;

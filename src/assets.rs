@@ -1,6 +1,8 @@
 use gpui_kit::{AssetSource, SharedString};
 use rust_embed::Embed;
 
+gpui_kit::assets::icon_assets!(ExtraIcons, [ArrowDownToLine]);
+
 #[derive(Embed)]
 #[folder = "assets"]
 pub struct AppAssets;
@@ -9,6 +11,10 @@ impl AssetSource for AppAssets {
     fn load(&self, path: &str) -> anyhow::Result<Option<std::borrow::Cow<'static, [u8]>>> {
         if let Some(file) = AppAssets::get(path) {
             return Ok(Some(file.data));
+        }
+
+        if let Some(data) = ExtraIcons.load(path)? {
+            return Ok(Some(data));
         }
 
         gpui_kit::assets::Assets.load(path)
@@ -20,6 +26,7 @@ impl AssetSource for AppAssets {
             .map(SharedString::from)
             .collect::<Vec<_>>();
         files.extend(gpui_kit::assets::Assets.list(path)?);
+        files.extend(ExtraIcons.list(path)?);
         Ok(files)
     }
 }

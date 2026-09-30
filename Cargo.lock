@@ -4912,6 +4912,7 @@ version = "0.1.0"
 dependencies = [
  "ali-oss-rs",
  "anyhow",
+ "chrono",
  "dirs 7.0.0",
  "dotenvy",
  "gpui-fps",
