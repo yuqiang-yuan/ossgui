@@ -77,7 +77,6 @@ impl BucketTableDelegate {
         }
     }
 
-    /// 由 MainView 调用；内部不 notify，通知由调用方统一发
     pub fn set_rows(&mut self, rows: Vec<BucketSummary>) {
         self.rows = rows;
         self.loading = false;
