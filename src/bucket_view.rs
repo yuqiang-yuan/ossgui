@@ -186,10 +186,10 @@ impl TableDelegate for BucketTableDelegate {
                         Button::new(format!("bucket-{}-button", row.name))
                             .text()
                             .label(row.name.clone())
-                            .on_click(move |_, _, cx| {
+                            .on_click(move |_, window, cx| {
                                 println!("bucket: {name} is clicked");
                                 panel
-                                    .update(cx, |panel, cx| panel.goto_bucket(&name, cx))
+                                    .update(cx, |panel, cx| panel.goto_bucket(&name, window, cx))
                                     .ok();
                             }),
                     )
@@ -418,10 +418,10 @@ impl BucketListPanel {
         });
     }
 
-    fn goto_bucket(&self, bucket_name: &str, cx: &mut Context<Self>) {
+    fn goto_bucket(&self, bucket_name: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.main_view
             .update(cx, |main_view, cx| {
-                main_view.browse_bucket(bucket_name.to_string(), cx);
+                main_view.browse_bucket(bucket_name.to_string(), window, cx);
             })
             .ok();
 

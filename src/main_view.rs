@@ -21,9 +21,10 @@ pub struct MainView {
     menubar: Entity<AppMenuBar>,
     show_fps: bool,
     bucket_list_panel: Entity<BucketListPanel>,
-    object_list_panel: Entity<ObjectListPanel>,
+    object_list_panel: Option<Entity<ObjectListPanel>>,
     bucket_name: Option<String>,
     scene: Scene,
+    ossclient: Arc<Client>,
 }
 
 impl MainView {
@@ -51,17 +52,20 @@ impl MainView {
             menubar: AppMenuBar::new(cx),
             show_fps: true,
             bucket_list_panel: cx.new(|cx| BucketListPanel::new(this_weak.clone(), ossclient.clone(), window, cx)),
-            object_list_panel: cx.new(|cx| ObjectListPanel::new(this_weak.clone(), ossclient.clone(), window, cx)),
+            object_list_panel: None,
             bucket_name: None,
             scene: Scene::Buckets,
+            ossclient,
         }
     }
 
-    pub fn browse_bucket(&mut self, bucket_name: String, cx: &mut Context<Self>) {
+    pub fn browse_bucket(&mut self, bucket_name: String, window: &mut Window, cx: &mut Context<Self>) {
         println!("Going to bucket: {}", bucket_name);
-        self.bucket_name = Some(bucket_name);
+        self.bucket_name = Some(bucket_name.clone());
         self.scene = Scene::Objects;
-
+        let this_weak = cx.weak_entity();
+        let ossclient = self.ossclient.clone();
+        self.object_list_panel = Some(cx.new(|cx| ObjectListPanel::new(this_weak.clone(), ossclient, &bucket_name, window, cx)));
         cx.notify();
     }
 }
@@ -101,10 +105,13 @@ impl Render for MainView {
                     .child(
                         div()
                             .size_full()
-                            .p_2()
-                            .when(matches!(self.scene, Scene::Buckets), |div| div.child(self.bucket_list_panel.clone()))
-                            .when(matches!(self.scene, Scene::Objects), |div| div.child(self.object_list_panel.clone()))
-
+                            .when(matches!(self.scene, Scene::Buckets), |div| div.p_2().child(self.bucket_list_panel.clone()))
+                            .when(matches!(self.scene, Scene::Objects), |d| d.child(
+                                match self.object_list_panel.clone() {
+                                    Some(panel) => panel.into_any_element(),
+                                    None => div().child("No objects").into_any_element()
+                                }
+                            ))
                     )
                     .when(self.show_fps, |this| this.child(fps_monitor(window, cx))),
             )
