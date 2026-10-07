@@ -8,7 +8,7 @@ use ali_oss_rs::{
 };
 use gpui_kit::{
     App, AppContext, Context, Div, Entity, Hsla, IntoElement, ParentElement, Render, Styled,
-    Subscription, Task, WeakEntity, Window,
+    Subscription, Task, TextAlign, WeakEntity, Window,
     assets::IconName,
     base::{
         Disableable, Placement, StyledExt,
@@ -54,7 +54,12 @@ impl BucketTableDelegate {
                 Column::new("ix", "#")
                     .width(px(60.0))
                     .text_right()
-                    .movable(false),
+                    .movable(false)
+                    .resizable(false),
+                Column::new("icon", "")
+                    .width(px(24.0))
+                    .movable(false)
+                    .resizable(false),
                 Column::new("name", "Bucket")
                     .width(px(260.0))
                     .sortable()
@@ -168,41 +173,47 @@ impl TableDelegate for BucketTableDelegate {
                 .text_right()
                 .child(format!("{}", row_ix + 1))
                 .into_any_element(),
-            1 => {
+            1 => div()
+                .size_full()
+                .h_flex()
+                .items_center()
+                .child(
+                    Icon::default()
+                        .path("icons/bucket.svg")
+                        .size_4()
+                        .text_color(get_color(row, cx)),
+                )
+                .into_any_element(),
+            2 => {
                 let panel = self.bucket_list_panel.clone();
                 let name = row.name.clone();
                 let region = row.region.clone();
                 div()
                     .h_flex()
-                    .items_baseline()
-                    .gap_1()
-                    .child(
-                        Icon::default()
-                            .path("icons/bucket.svg")
-                            .size_4()
-                            .text_color(get_color(row, cx)),
-                    )
                     .child(
                         Button::new(format!("bucket-{}-button", row.name))
                             .text()
+                            .text_align(TextAlign::Left)
                             .label(row.name.clone())
                             .on_click(move |_, window, cx| {
                                 println!("bucket: {name} is clicked");
                                 panel
-                                    .update(cx, |panel, cx| panel.goto_bucket(&name, &region, window, cx))
+                                    .update(cx, |panel, cx| {
+                                        panel.goto_bucket(&name, &region, window, cx)
+                                    })
                                     .ok();
                             }),
                     )
                     .into_any_element()
             }
-            2 => div().child(row.region.clone()).into_any_element(),
-            3 => div()
+            3 => div().child(row.region.clone()).into_any_element(),
+            4 => div()
                 .child(format_datetime(&row.creation_date))
                 .into_any_element(),
-            4 => div()
+            5 => div()
                 .child(row.storage_class.to_string())
                 .into_any_element(),
-            5 => {
+            6 => {
                 let panel = self.bucket_list_panel.clone();
                 let name = row.name.clone();
                 div()
@@ -418,7 +429,13 @@ impl BucketListPanel {
         });
     }
 
-    fn goto_bucket(&self, bucket_name: &str, region: &str, window: &mut Window, cx: &mut Context<Self>) {
+    fn goto_bucket(
+        &self,
+        bucket_name: &str,
+        region: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.main_view
             .update(cx, |main_view, cx| {
                 main_view.goto_object_list(bucket_name.to_string(), region.to_string(), window, cx);
