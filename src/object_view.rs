@@ -1,20 +1,22 @@
 use std::sync::Arc;
 
-use ali_oss_rs::{Client, bucket_common::ObjectSummary};
-use gpui_kit::{App, AppContext, Context, Element, Entity, IntoElement, ParentElement, Render, Styled, WeakEntity, Window, assets::IconName, base::{Checkbox, StyledExt, input::InputState}, component::{ActiveTheme, Icon, Sizable, button::{Button, ButtonVariants}, input::Input, menu::{ContextMenuExt, DropdownMenu, PopupMenuItem}, table::{Column, ColumnSort, DataTable, TableDelegate, TableState}}, div, px};
+use ali_oss_rs::{Client, bucket::BucketOperations, bucket_common::ObjectSummary};
+use gpui_kit::{App, AppContext, Context, Entity, IntoElement, ParentElement, Render, Styled, Task, WeakEntity, Window, assets::IconName, base::{Checkbox, StyledExt, input::InputState}, component::{ActiveTheme, Icon, Sizable, WindowExt, button::{Button, ButtonVariants}, input::Input, menu::DropdownMenu, notification::NotificationType, table::{Column, ColumnSort, DataTable, TableDelegate, TableState}}, div, px};
 
-use crate::{actions::{CopyAction, CutAction, DeleteAction, PasteAction}, main_view::MainView};
+use crate::{actions::{CopyAction, CutAction, DeleteAction, PasteAction}, common::{AbortOnDrop, LoadState, oss_region_map, tokio_runtime}, main_view::MainView};
 
 pub struct ObjectListPanel {
     ossclient: Arc<Client>,
     main_view: WeakEntity<MainView>,
     bucket_name: String,
     search_state: Entity<InputState>,
+    load_state: LoadState,
     objects_state: Entity<TableState<ObjectTableDelegate>>,
+    load_task: Task<()>,
 }
 
 impl ObjectListPanel {
-    pub fn new(main_view: WeakEntity<MainView>, ossclient: Arc<Client>, bucket_name: &str, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(main_view: WeakEntity<MainView>, ossclient: Arc<Client>, bucket_name: String, region: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let search_state = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("Search")
@@ -22,12 +24,15 @@ impl ObjectListPanel {
         });
 
         let this_weak = cx.weak_entity();
+        let endpoint = oss_region_map().get(region.as_str()).map(|r| r.to_string()).unwrap_or(format!("oss-{}.aliyuncs.com", region));
 
         let mut this = Self {
             main_view,
-            ossclient,
+            ossclient: Arc::new(ossclient.clone_to(region, endpoint)),
             bucket_name: bucket_name.to_string(),
             search_state,
+            load_state: LoadState::Idle,
+            load_task: Task::ready(()),
             objects_state: cx.new(|cx| TableState::new(ObjectTableDelegate::new(this_weak), window, cx)
                 .row_selectable(true)
                 .col_selectable(false)
@@ -40,36 +45,87 @@ impl ObjectListPanel {
     }
 
     fn load_objects(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.load_state, LoadState::Loading) {
+            return;
+        }
 
+        self.load_state = LoadState::Loading;
+        cx.notify();
+
+        let client = self.ossclient.clone();
+        let handle = tokio_runtime().handle().clone();
+        let bucket_name = self.bucket_name.clone();
+
+        self.load_task = cx.spawn(async move |this, cx| {
+            let join = handle.spawn(async move {
+                client.list_objects(bucket_name, None).await
+            });
+
+            let _abort_on_drop = AbortOnDrop(join.abort_handle());
+            let result = match join.await {
+                Ok(Ok(v)) => Ok(v),
+                Ok(Err(e)) => Err(anyhow::anyhow!("{e}")),
+                Err(join_err) => Err(anyhow::anyhow!("oss task failed: {join_err}")),
+            };
+
+            this.update_in(cx, |view, window, cx| {
+                match result {
+                    Ok(results) => {
+                        view.objects_state.update(cx, |state, cx| {
+                            state.delegate_mut().set_rows(results.contents);
+                            cx.notify();
+                        });
+                    },
+                    Err(e) => {
+                        let msg = e.to_string();
+                        view.load_state = LoadState::Failed;
+                        window.push_notification((NotificationType::Error, msg), cx);
+                    }
+                }
+                cx.notify();
+            }).ok();
+        });
     }
 
     /// Title bar for object list
-    fn titlebar(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn navbar(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .h_flex()
             .w_full()
             .border_b_1()
             .border_color(cx.theme().border)
             .child(
-                Button::new("home-button")
-                    .icon(IconName::House)
-                    .rounded_none()
-                    .border_0()
+                {
+                    let main_view = self.main_view.clone();
+                    Button::new("home-button")
+                        .tooltip("Goto bucket list")
+                        .icon(IconName::House)
+                        .rounded_none()
+                        .border_0()
+                        .on_click(move |_, window, cx| {
+                            main_view.update(cx, |view, cx| {
+                                view.goto_bucket_list(window, cx);
+                            }).ok();
+                        })
+                }
             )
             .child(
                 Button::new("back-button")
+                    .tooltip("Backward")
                     .icon(IconName::ArrowLeft)
                     .rounded_none()
                     .border_0()
             )
             .child(
                 Button::new("forward-button")
+                    .tooltip("Forward")
                     .icon(IconName::ArrowRight)
                     .rounded_none()
                     .border_0()
             )
             .child(
                 Button::new("refresh-button")
+                    .tooltip("Refresh")
                     .icon(IconName::RefreshCw)
                     .rounded_none()
                     .border_0()
@@ -149,7 +205,7 @@ impl Render for ObjectListPanel {
             .size_full()
             .v_flex()
             .gap_2()
-            .child(self.titlebar(window, cx))
+            .child(self.navbar(window, cx))
             .child(div().px_2().text_2xl().child("Objects"))
             .child(self.actions_bar(window, cx))
             .child(

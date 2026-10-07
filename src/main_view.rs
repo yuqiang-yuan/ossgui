@@ -59,13 +59,20 @@ impl MainView {
         }
     }
 
-    pub fn browse_bucket(&mut self, bucket_name: String, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn goto_object_list(&mut self, bucket_name: String, region: String, window: &mut Window, cx: &mut Context<Self>) {
         println!("Going to bucket: {}", bucket_name);
         self.bucket_name = Some(bucket_name.clone());
         self.scene = Scene::Objects;
         let this_weak = cx.weak_entity();
         let ossclient = self.ossclient.clone();
-        self.object_list_panel = Some(cx.new(|cx| ObjectListPanel::new(this_weak.clone(), ossclient, &bucket_name, window, cx)));
+        self.object_list_panel = Some(cx.new(|cx| ObjectListPanel::new(this_weak.clone(), ossclient, bucket_name, region, window, cx)));
+        cx.notify();
+    }
+
+    pub fn goto_bucket_list(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.bucket_name = None;
+        self.scene = Scene::Buckets;
+        self.object_list_panel = None;
         cx.notify();
     }
 }

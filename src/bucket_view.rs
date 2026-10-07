@@ -171,6 +171,7 @@ impl TableDelegate for BucketTableDelegate {
             1 => {
                 let panel = self.bucket_list_panel.clone();
                 let name = row.name.clone();
+                let region = row.region.clone();
                 div()
                     .h_flex()
                     .items_baseline()
@@ -188,7 +189,7 @@ impl TableDelegate for BucketTableDelegate {
                             .on_click(move |_, window, cx| {
                                 println!("bucket: {name} is clicked");
                                 panel
-                                    .update(cx, |panel, cx| panel.goto_bucket(&name, window, cx))
+                                    .update(cx, |panel, cx| panel.goto_bucket(&name, &region, window, cx))
                                     .ok();
                             }),
                     )
@@ -417,10 +418,10 @@ impl BucketListPanel {
         });
     }
 
-    fn goto_bucket(&self, bucket_name: &str, window: &mut Window, cx: &mut Context<Self>) {
+    fn goto_bucket(&self, bucket_name: &str, region: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.main_view
             .update(cx, |main_view, cx| {
-                main_view.browse_bucket(bucket_name.to_string(), window, cx);
+                main_view.goto_object_list(bucket_name.to_string(), region.to_string(), window, cx);
             })
             .ok();
 
