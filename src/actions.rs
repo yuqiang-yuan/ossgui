@@ -1,4 +1,4 @@
-use gpui_kit::{Action, actions};
+use gpui_kit::actions;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 

@@ -81,7 +81,7 @@ impl ObjectListPanel {
         this
     }
 
-    fn load_objects(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn load_objects(&mut self, _: &mut Window, cx: &mut Context<Self>) {
         if matches!(self.load_state, LoadState::Loading) {
             return;
         }
@@ -322,7 +322,7 @@ impl ObjectListPanel {
             )
     }
 
-    pub fn paginator_bar(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    pub fn paginator_bar(&self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .p_2()
             .w_full()
@@ -356,6 +356,23 @@ impl Render for ObjectListPanel {
 enum OssObjectItem {
     Folder(String),
     File(ObjectSummary),
+}
+
+impl OssObjectItem {
+    fn get_key(&self) -> &String {
+        match self {
+            Self::Folder(f) => f,
+            Self::File(object_summary) => &object_summary.key,
+        }
+    }
+
+    fn is_folder(&self) -> bool {
+        matches!(self, Self::Folder(_))
+    }
+
+    fn is_file(&self) -> bool {
+        matches!(self, Self::File(_))
+    }
 }
 
 struct ObjectTableDelegate {
@@ -427,15 +444,7 @@ impl ObjectTableDelegate {
             .rows
             .iter()
             .enumerate()
-            .filter(|(_, o)| {
-                needle.is_empty()
-                    || (match o {
-                        OssObjectItem::Folder(s) => s,
-                        OssObjectItem::File(f) => &f.key,
-                    })
-                    .to_ascii_lowercase()
-                    .contains(&needle)
-            })
+            .filter(|(_, o)| needle.is_empty() || o.get_key().to_ascii_lowercase().contains(&needle))
             .map(|(ix, _)| ix)
             .collect();
 
@@ -449,20 +458,12 @@ impl ObjectTableDelegate {
                 2 => {
                     let item_a = &self.rows[a];
                     let item_b = &self.rows[b];
-                    let name_a = match item_a {
-                        OssObjectItem::Folder(s) => s,
-                        OssObjectItem::File(f) => &f.key,
-                    };
+                    let key_a = item_a.get_key();
 
-                    let name_b = match item_b {
-                        OssObjectItem::Folder(s) => s,
-                        OssObjectItem::File(f) => &f.key,
-                    };
+                    let key_b = item_b.get_key();
 
-                    if matches!(item_a, OssObjectItem::Folder(_))
-                        && matches!(item_b, OssObjectItem::Folder(_))
-                    {
-                        let o = name_a.cmp(name_b);
+                    if item_a.is_folder() && item_b.is_folder() {
+                        let o = key_a.cmp(key_b);
 
                         if desc {
                             return o.reverse();
@@ -472,22 +473,16 @@ impl ObjectTableDelegate {
                     }
 
                     // folder always shown first
-                    if matches!(item_a, OssObjectItem::Folder(_))
-                        && matches!(item_b, OssObjectItem::File(_))
-                    {
+                    if item_a.is_folder() && item_b.is_file() {
                         return Ordering::Less;
                     }
 
-                    if matches!(item_a, OssObjectItem::File(_))
-                        && matches!(item_b, OssObjectItem::Folder(_))
-                    {
+                    if item_a.is_file() && item_b.is_folder() {
                         return Ordering::Greater;
                     }
 
-                    if matches!(item_a, OssObjectItem::File(_))
-                        && matches!(item_b, OssObjectItem::File(_))
-                    {
-                        let o = name_a.cmp(name_b);
+                    if item_a.is_file() && item_b.is_file() {
+                        let o = key_a.cmp(key_b);
 
                         if desc {
                             return o.reverse();
@@ -510,15 +505,15 @@ impl ObjectTableDelegate {
 }
 
 impl TableDelegate for ObjectTableDelegate {
-    fn columns_count(&self, cx: &gpui_kit::App) -> usize {
+    fn columns_count(&self, _: &gpui_kit::App) -> usize {
         self.columns.len()
     }
 
-    fn rows_count(&self, cx: &gpui_kit::App) -> usize {
+    fn rows_count(&self, _: &gpui_kit::App) -> usize {
         self.filtered_indexes.len()
     }
 
-    fn column(&self, col_ix: usize, cx: &gpui_kit::App) -> Column {
+    fn column(&self, col_ix: usize, _: &gpui_kit::App) -> Column {
         self.columns[col_ix].clone()
     }
 
@@ -530,20 +525,17 @@ impl TableDelegate for ObjectTableDelegate {
         &mut self,
         row_ix: usize,
         col_ix: usize,
-        window: &mut Window,
-        cx: &mut Context<gpui_kit::component::table::TableState<Self>>,
+        _: &mut Window,
+        _: &mut Context<gpui_kit::component::table::TableState<Self>>,
     ) -> impl IntoElement {
         let Some(row) = self.row(row_ix) else {
             return div();
         };
 
-        let key = match row {
-            OssObjectItem::Folder(s) => &s,
-            OssObjectItem::File(f) => &f.key,
-        };
+        let key = row.get_key();
 
         let name = &key[self.prefix.len()..];
-        let is_folder = matches!(row, OssObjectItem::Folder(_));
+        let is_folder = row.is_folder();
 
         match col_ix {
             0 => div()
@@ -557,13 +549,7 @@ impl TableDelegate for ObjectTableDelegate {
                 .h_flex()
                 .items_center()
                 .justify_center()
-                .child(
-                    (match row {
-                        OssObjectItem::Folder(_) => div().child(IconName::Folder),
-                        OssObjectItem::File(_) => div().child(IconName::File),
-                    })
-                    .size_4(),
-                ),
+                .child((if row.is_folder() { div().child(IconName::Folder) } else { div().child(IconName::File) }).size_4()),
             2 => div().size_full().h_flex().child({
                 let object_list_panel = self.object_list_panel.clone();
                 let key_cloned = key.clone();
