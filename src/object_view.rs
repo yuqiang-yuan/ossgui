@@ -6,20 +6,12 @@ use ali_oss_rs::{
     bucket_common::{ListObjectsOptionsBuilder, ListObjectsResult, ObjectSummary},
 };
 use gpui_kit::{
-    App, AppContext, Context, Entity, IntoElement, ParentElement, Render, Styled, Task, WeakEntity,
-    Window,
-    assets::IconName,
-    base::{StyledExt, input::InputState},
-    component::{
-        ActiveTheme, Icon, Sizable, WindowExt,
-        button::{Button, ButtonVariants},
-        checkbox::Checkbox,
-        input::Input,
-        menu::DropdownMenu,
-        notification::NotificationType,
-        table::{Column, ColumnSort, DataTable, TableDelegate, TableState},
-    },
-    div, px,
+    App, AppContext, Context, Entity, IntoElement, ParentElement, Render, Styled, Subscription, Task, WeakEntity, Window, assets::IconName, base::{
+        Disableable, IndexPath, StyledExt,
+        input::{InputEvent, InputState},
+    }, component::{
+        ActiveTheme, Icon, Sizable, WindowExt, button::{Button, ButtonVariants}, checkbox::Checkbox, input::Input, menu::DropdownMenu, notification::NotificationType, select::{Select, SelectEvent, SelectState}, table::{Column, ColumnSort, DataTable, TableDelegate, TableState},
+    }, div, px,
 };
 
 use crate::{
@@ -33,10 +25,15 @@ pub struct ObjectListPanel {
     main_view: WeakEntity<MainView>,
     bucket_name: String,
     prefix: String,
+    page_size: usize,
+    next_continuation_token: Option<String>,
+    is_truncated: bool,
     search_state: Entity<InputState>,
     load_state: LoadState,
     objects_state: Entity<TableState<ObjectTableDelegate>>,
     load_task: Task<()>,
+    page_size_state: Entity<SelectState<Vec<&'static str>>>,
+    _subs: Vec<Subscription>,
 }
 
 impl ObjectListPanel {
@@ -54,6 +51,41 @@ impl ObjectListPanel {
                 .clean_on_escape()
         });
 
+        let search_sub =
+            cx.subscribe(
+                &search_state,
+                |this, state, event: &InputEvent, cx| match event {
+                    InputEvent::Change => {
+                        let s = state.read(cx).value();
+                        this.objects_state.update(cx, |state, _| {
+                            state.delegate_mut().apply_filter(&s);
+                        });
+                    }
+                    _ => {}
+                },
+            );
+
+        let page_size_state = cx.new(|cx| {
+            SelectState::new(
+                vec!["100", "200", "500", "1000"],
+                Some(IndexPath::new(0usize)),
+                window,
+                cx,
+            )
+        });
+
+        let page_size_sub = cx.subscribe(&page_size_state, |this, _, event: &SelectEvent<Vec<&'static str>>, cx| {
+            match event {
+                SelectEvent::Confirm(item) => {
+                    if let Some(s) = item {
+                        this.next_continuation_token = None;
+                        this.page_size = usize::from_str_radix(s, 10).unwrap_or(100usize);
+                        this.load_objects(cx);
+                    }
+                },
+            }
+        });
+
         let this_weak = cx.weak_entity();
         let endpoint = oss_region_map()
             .get(region.as_str())
@@ -65,23 +97,28 @@ impl ObjectListPanel {
             ossclient: Arc::new(ossclient.clone_to(region, endpoint)),
             bucket_name: bucket_name.to_string(),
             prefix: String::new(),
+            page_size: 100usize,
+            next_continuation_token: None,
+            is_truncated: false,
             search_state,
             load_state: LoadState::Idle,
             load_task: Task::ready(()),
+            page_size_state,
             objects_state: cx.new(|cx| {
                 TableState::new(ObjectTableDelegate::new(this_weak), window, cx)
                     .row_selectable(true)
                     .col_selectable(false)
                     .cell_selectable(false)
             }),
+            _subs: vec![search_sub, page_size_sub],
         };
 
-        cx.on_next_frame(window, |this, window, cx| this.load_objects(window, cx));
+        cx.on_next_frame(window, |this, _, cx| this.load_objects(cx));
 
         this
     }
 
-    fn load_objects(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+    fn load_objects(&mut self, cx: &mut Context<Self>) {
         if matches!(self.load_state, LoadState::Loading) {
             return;
         }
@@ -89,26 +126,29 @@ impl ObjectListPanel {
         println!("loading objects with prefix: {}", self.prefix);
 
         self.load_state = LoadState::Loading;
+        self.objects_state
+            .update(cx, |state, _| state.delegate_mut().loading = true);
         cx.notify();
 
         let client = self.ossclient.clone();
         let handle = tokio_runtime().handle().clone();
         let bucket_name = self.bucket_name.clone();
         let prefix = self.prefix.clone();
+        let next_continuation_token = self.next_continuation_token.clone();
+        let max_keys = self.page_size;
 
         self.load_task = cx.spawn(async move |this, cx| {
             let join = handle.spawn(async move {
-                client
-                    .list_objects(
-                        bucket_name,
-                        Some(
-                            ListObjectsOptionsBuilder::new()
-                                .prefix(prefix)
-                                .delimiter('/')
-                                .build(),
-                        ),
-                    )
-                    .await
+                let mut options = ListObjectsOptionsBuilder::new()
+                    .prefix(prefix)
+                    .delimiter('/')
+                    .max_keys(max_keys as u32);
+
+                if let Some(t) = next_continuation_token {
+                    options = options.continuation_token(t);
+                }
+
+                client.list_objects(bucket_name, Some(options.build())).await
             });
 
             let _abort_on_drop = AbortOnDrop(join.abort_handle());
@@ -137,6 +177,10 @@ impl ObjectListPanel {
                                 contents,
                             } = results;
 
+                            println!("list objects result: name: {name}, max keys: {max_keys}, key count: {key_count}, continuation token: {:?}, next continuation token: {:?}", continuation_token, next_continuation_token);
+
+                            this.is_truncated = is_truncated;
+                            this.next_continuation_token = next_continuation_token;
                             // common_prefixes.iter().for_each(|c| println!("prefix: {prefix}, common prefix: {c}"));
                             // contents.iter().for_each(|f| println!("prefix: {prefix}, object: {}", f.key));
 
@@ -164,6 +208,7 @@ impl ObjectListPanel {
                         window.push_notification((NotificationType::Error, msg), cx);
                     }
                 }
+                this.objects_state.update(cx, |state, _| state.delegate_mut().loading = false);
                 cx.notify();
             })
             .ok();
@@ -237,11 +282,13 @@ impl ObjectListPanel {
                         Button::new("breadcrumb-bucket-button")
                             .text()
                             .label(self.bucket_name.clone())
-                            .on_click(cx.listener(|this, _, window, cx| {
+                            .on_click(cx.listener(|this, _, _, cx| {
                                 this.prefix = String::new();
-                                this.load_objects(window, cx);
+                                this.next_continuation_token = None;
+                                this.load_objects(cx);
                             })),
-                    ).children(self.breadcrumb_items(window, cx)),
+                    )
+                    .children(self.breadcrumb_items(window, cx)),
             )
     }
 
@@ -267,9 +314,9 @@ impl ObjectListPanel {
                 Button::new(format!("breadcrumb-prefix-{}", acc))
                     .text()
                     .label(format!("/{p}"))
-                    .on_click(cx.listener(move |this, _, window, cx| {
+                    .on_click(cx.listener(move |this, _, _, cx| {
                         this.prefix = prefix.clone();
-                        this.load_objects(window, cx);
+                        this.load_objects(cx);
                     }))
             })
             .collect::<Vec<_>>()
@@ -308,7 +355,7 @@ impl ObjectListPanel {
                 Button::new("more-button")
                     .label("More")
                     .dropdown_caret(true)
-                    .dropdown_menu(|menu, window, cx| {
+                    .dropdown_menu(|menu, _, _| {
                         menu.menu_with_icon("Copy", IconName::Copy, Box::new(CopyAction))
                             .menu_with_icon("Cut", IconName::ClipboardX, Box::new(CutAction))
                             .menu_with_icon(
@@ -327,9 +374,24 @@ impl ObjectListPanel {
             .p_2()
             .w_full()
             .h_flex()
+            .gap_1()
             .items_center()
+            .justify_end()
             .border_t_1()
             .border_color(cx.theme().border)
+            .child(div().child(""))
+            .child(div().text_sm().child("Max keys"))
+            .child(div().w_24().child(Select::new(&self.page_size_state)))
+            .child(
+                Button::new("next-page-button")
+                    .tooltip("Next page")
+                    .icon(IconName::ChevronRight)
+                    .disabled(!self.is_truncated)
+                    .loading(matches!(self.load_state, LoadState::Loading))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.load_objects(cx);
+                    })),
+            )
     }
 }
 
@@ -407,7 +469,7 @@ impl ObjectTableDelegate {
                     .movable(false)
                     .resizable(false),
                 Column::new("name", "Name")
-                    .width(px(200.0))
+                    .width(px(300.0))
                     .movable(false)
                     .sortable(),
             ],
@@ -444,7 +506,9 @@ impl ObjectTableDelegate {
             .rows
             .iter()
             .enumerate()
-            .filter(|(_, o)| needle.is_empty() || o.get_key().to_ascii_lowercase().contains(&needle))
+            .filter(|(_, o)| {
+                needle.is_empty() || o.get_key().to_ascii_lowercase().contains(&needle)
+            })
             .map(|(ix, _)| ix)
             .collect();
 
@@ -549,20 +613,28 @@ impl TableDelegate for ObjectTableDelegate {
                 .h_flex()
                 .items_center()
                 .justify_center()
-                .child((if row.is_folder() { div().child(IconName::Folder) } else { div().child(IconName::File) }).size_4()),
+                .child(
+                    (if row.is_folder() {
+                        div().child(IconName::Folder)
+                    } else {
+                        div().child(IconName::File)
+                    })
+                    .size_4(),
+                ),
             2 => div().size_full().h_flex().child({
                 let object_list_panel = self.object_list_panel.clone();
                 let key_cloned = key.clone();
                 Button::new(format!("goto-folder-button-{}", key))
                     .label(name)
                     .text()
-                    .on_click(move |_, window, cx| {
+                    .on_click(move |_, _, cx| {
                         if is_folder {
                             let key_cloned = key_cloned.clone();
                             object_list_panel
                                 .update(cx, move |panel, cx| {
                                     panel.prefix = key_cloned;
-                                    panel.load_objects(window, cx);
+                                    panel.next_continuation_token = None;
+                                    panel.load_objects(cx);
                                 })
                                 .ok();
                         }
@@ -570,5 +642,16 @@ impl TableDelegate for ObjectTableDelegate {
             }),
             _ => div(),
         }
+    }
+
+    fn perform_sort(
+        &mut self,
+        col_ix: usize,
+        sort: ColumnSort,
+        _: &mut Window,
+        _: &mut Context<'_, TableState<Self>>,
+    ) {
+        self.current_sort = Some((col_ix, sort));
+        self.recompute();
     }
 }
