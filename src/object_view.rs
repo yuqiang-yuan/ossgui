@@ -9,9 +9,8 @@ use ali_oss_rs::{
     presign_common::PresignGetOptionsBuilder,
 };
 use gpui_kit::{
-    App, AppContext, Context, Div, Entity,
-    InteractiveElement, IntoElement, ParentElement, Render, Styled, StyledImage, Subscription,
-    Task, TextAlign, WeakEntity, Window,
+    App, AppContext, Context, Div, Entity, InteractiveElement, IntoElement, ParentElement, Render,
+    Styled, StyledImage, Subscription, Task, TextAlign, WeakEntity, Window,
     assets::IconName,
     base::{
         Disableable, IndexPath, Placement, StyledExt,
@@ -53,6 +52,8 @@ pub struct ObjectListPanel {
     objects_state: Entity<TableState<ObjectTableDelegate>>,
     load_task: Task<()>,
     page_size_state: Entity<SelectState<Vec<&'static str>>>,
+
+    create_folder_task: Task<()>,
     _subs: Vec<Subscription>,
 }
 
@@ -131,6 +132,7 @@ impl ObjectListPanel {
                     .col_selectable(false)
                     .cell_selectable(false)
             }),
+            create_folder_task: Task::ready(()),
             _subs: vec![search_sub, page_size_sub],
         };
 
@@ -342,7 +344,7 @@ impl ObjectListPanel {
             .collect::<Vec<_>>()
     }
 
-    fn actions_bar(&self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn actions_bar(&self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .px_2()
             .w_full()
@@ -369,7 +371,42 @@ impl ObjectListPanel {
             .child(
                 Button::new("new-folder-button")
                     .icon(IconName::Plus)
-                    .label("New Folder"),
+                    .label("New Folder")
+                    .on_click(cx.listener(|_, _, window, cx| {
+                        let weak_this = cx.weak_entity();
+                        let new_folder_panel =
+                            cx.new(|cx| NewFolderPanel::new(weak_this, window, cx));
+
+                        window.open_dialog(cx, move |dialog, _, _| {
+                            let panel_for_ok = new_folder_panel.clone();
+                            dialog
+                                .title("New folder")
+                                .child(new_folder_panel.clone())
+                                .footer(
+                                    div()
+                                        .size_full()
+                                        .h_flex()
+                                        .justify_end()
+                                        .gap_2()
+                                        .child(
+                                            Button::new("new-folder-ok-button")
+                                                .primary()
+                                                .label("Create")
+                                                .on_click(move |_, window, cx| {
+                                                    panel_for_ok.update(cx, |this, cx| {
+                                                        this.on_confirmed(window, cx);
+                                                    });
+                                                }),
+                                        )
+                                        .child(
+                                            Button::new("new-folder-cancel-button")
+                                                .label("Cancel")
+                                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                                        ),
+                                )
+                                .overlay_closable(false)
+                        });
+                    })),
             )
             .child(
                 Button::new("more-button")
@@ -389,7 +426,7 @@ impl ObjectListPanel {
             )
     }
 
-    pub fn paginator_bar(&self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn paginator_bar(&self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .p_2()
             .w_full()
@@ -429,6 +466,34 @@ impl ObjectListPanel {
             sheet.p_0().title("Object detail").child(meta_panel.clone())
         });
     }
+
+    fn create_folder(&mut self, folder_name: String, cx: &mut Context<Self>) {
+        let client = self.ossclient.clone();
+        let bucket_name = self.bucket_name.clone();
+        let folder_object_key = format!("{}{}/", self.prefix, folder_name);
+        let handle = tokio_runtime().handle().clone();
+
+        self.create_folder_task = cx.spawn(async move |this, cx| {
+            let join = handle.spawn(async move { client.create_folder(bucket_name, folder_object_key).await });
+            let _abort_on_drop = AbortOnDrop(join.abort_handle());
+
+            let result = match join.await {
+                Ok(Ok(_)) => Ok(()),
+                Ok(Err(e)) => Err(anyhow::anyhow!("{e}")),
+                Err(e) => Err(anyhow::anyhow!("{e}")),
+            };
+
+            this.update_in(cx, |this, window, cx| {
+                match result {
+                    Ok(_) => this.load_objects(cx),
+                    Err(e) => {
+                        let msg = e.to_string();
+                        window.push_notification((NotificationType::Error, msg), cx);
+                    },
+                }
+            }).ok();
+        });
+    }
 }
 
 impl Render for ObjectListPanel {
@@ -448,6 +513,52 @@ impl Render for ObjectListPanel {
                 ),
             )
             .child(self.paginator_bar(window, cx))
+    }
+}
+
+/// Panel for new folder dialog
+struct NewFolderPanel {
+    object_list_panel: WeakEntity<ObjectListPanel>,
+    input_state: Entity<InputState>,
+}
+
+impl NewFolderPanel {
+    fn new(
+        object_list_panel: WeakEntity<ObjectListPanel>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self {
+            object_list_panel,
+            input_state: cx.new(|cx| InputState::new(window, cx)),
+        }
+    }
+
+    fn on_confirmed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let name = self.input_state.read(cx).value().trim().to_string();
+        if name.is_empty() || name.contains('/') || name.contains('\\') {
+            window.push_notification((NotificationType::Error, "Folder name must not be empty and must not contain / or \\"), cx);
+            return;
+        }
+
+        println!("new folder name: {name}");
+
+        self.object_list_panel.update(cx, |panel, cx| {
+            panel.create_folder(name, cx);
+        }).ok();
+
+        window.close_dialog(cx);
+    }
+}
+
+impl Render for NewFolderPanel {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .size_full()
+            .v_flex()
+            .gap_1()
+            .child(div().text_sm().child("Folder name"))
+            .child(Input::new(&self.input_state))
     }
 }
 
@@ -948,7 +1059,9 @@ impl ObjectMetaPanel {
                     )
                 } else {
                     div()
-                        .size_full()
+                        .w_full()
+                        .h_56()
+                        .flex()
                         .items_center()
                         .justify_end()
                         .text_sm()
