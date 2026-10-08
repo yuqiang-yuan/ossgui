@@ -9,8 +9,7 @@ use ali_oss_rs::{
     presign_common::PresignGetOptionsBuilder,
 };
 use gpui_kit::{
-    App, AppContext, Context, Div, Element, Entity,
-    ImageSource::Resource,
+    App, AppContext, Context, Div, Entity,
     InteractiveElement, IntoElement, ParentElement, Render, Styled, StyledImage, Subscription,
     Task, TextAlign, WeakEntity, Window,
     assets::IconName,

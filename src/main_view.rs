@@ -69,7 +69,7 @@ impl MainView {
         cx.notify();
     }
 
-    pub fn goto_bucket_list(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn goto_bucket_list(&mut self, _: &mut Window, cx: &mut Context<Self>) {
         self.bucket_name = None;
         self.scene = Scene::Buckets;
         self.object_list_panel = None;
