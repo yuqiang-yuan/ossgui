@@ -4,19 +4,37 @@ use ali_oss_rs::{
     Client,
     bucket::BucketOperations,
     bucket_common::{ListObjectsOptionsBuilder, ListObjectsResult, ObjectSummary},
+    object::ObjectOperations,
+    object_common::ObjectMetadata,
 };
 use gpui_kit::{
-    App, AppContext, Context, Entity, IntoElement, ParentElement, Render, Styled, Subscription, Task, WeakEntity, Window, assets::IconName, base::{
-        Disableable, IndexPath, StyledExt,
+    App, AppContext, Context, Div, Entity, IntoElement, ParentElement, Render, Styled,
+    Subscription, Task, TextAlign, WeakEntity, Window,
+    assets::IconName,
+    base::{
+        Disableable, IndexPath, Placement, StyledExt,
         input::{InputEvent, InputState},
-    }, component::{
-        ActiveTheme, Icon, Sizable, WindowExt, button::{Button, ButtonVariants}, checkbox::Checkbox, input::Input, menu::DropdownMenu, notification::NotificationType, select::{Select, SelectEvent, SelectState}, table::{Column, ColumnSort, DataTable, TableDelegate, TableState},
-    }, div, px,
+    },
+    component::{
+        ActiveTheme, Icon, Sizable, WindowExt,
+        button::{Button, ButtonVariants},
+        checkbox::Checkbox,
+        description_list::{DescriptionItem, DescriptionList},
+        input::Input,
+        menu::DropdownMenu,
+        notification::NotificationType,
+        progress::ProgressCircle,
+        select::{Select, SelectEvent, SelectState},
+        table::{Column, ColumnSort, DataTable, TableDelegate, TableState},
+    },
+    div, px,
 };
 
 use crate::{
     actions::{CopyAction, CutAction, DeleteAction, PasteAction},
-    common::{AbortOnDrop, LoadState, oss_region_map, tokio_runtime},
+    common::{
+        AbortOnDrop, LoadState, format_datetime, format_file_size, oss_region_map, tokio_runtime,
+    },
     main_view::MainView,
 };
 
@@ -74,17 +92,18 @@ impl ObjectListPanel {
             )
         });
 
-        let page_size_sub = cx.subscribe(&page_size_state, |this, _, event: &SelectEvent<Vec<&'static str>>, cx| {
-            match event {
+        let page_size_sub = cx.subscribe(
+            &page_size_state,
+            |this, _, event: &SelectEvent<Vec<&'static str>>, cx| match event {
                 SelectEvent::Confirm(item) => {
                     if let Some(s) = item {
                         this.next_continuation_token = None;
                         this.page_size = usize::from_str_radix(s, 10).unwrap_or(100usize);
                         this.load_objects(cx);
                     }
-                },
-            }
-        });
+                }
+            },
+        );
 
         let this_weak = cx.weak_entity();
         let endpoint = oss_region_map()
@@ -393,6 +412,25 @@ impl ObjectListPanel {
                     })),
             )
     }
+
+    fn show_object_meta(
+        &mut self,
+        object_key: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let client = self.ossclient.clone();
+        let bucket_name = self.bucket_name.clone();
+        let meta_panel =
+            cx.new(|cx| ObjectMetaPanel::new(client, bucket_name, object_key.clone(), window, cx));
+
+        window.open_sheet_at(Placement::Right, cx, move |sheet, _, _| {
+            sheet
+                .p_0()
+                .title("Object meta")
+                .child(meta_panel.clone())
+        });
+    }
 }
 
 impl Render for ObjectListPanel {
@@ -435,6 +473,13 @@ impl OssObjectItem {
     fn is_file(&self) -> bool {
         matches!(self, Self::File(_))
     }
+
+    fn get_size(&self) -> u64 {
+        match self {
+            Self::File(f) => f.size,
+            Self::Folder(_) => 0u64,
+        }
+    }
 }
 
 struct ObjectTableDelegate {
@@ -472,6 +517,14 @@ impl ObjectTableDelegate {
                     .width(px(300.0))
                     .movable(false)
                     .sortable(),
+                Column::new("size", "Size")
+                    .width(px(100.0))
+                    .text_right()
+                    .movable(false)
+                    .sortable(),
+                Column::new("storage_class", "Storage class")
+                    .width(px(120.0))
+                    .movable(false),
             ],
         }
     }
@@ -512,9 +565,17 @@ impl ObjectTableDelegate {
             .map(|(ix, _)| ix)
             .collect();
 
+        if self.current_sort.is_none() {
+            return;
+        }
+
         let Some((col_ix, sort)) = self.current_sort else {
             return; // 没有排序 → 自然序，完事
         };
+
+        if matches!(sort, ColumnSort::Default) {
+            return;
+        }
 
         let desc = matches!(sort, ColumnSort::Descending);
         self.filtered_indexes.sort_by(|&a, &b| {
@@ -557,6 +618,24 @@ impl ObjectTableDelegate {
 
                     return Ordering::Equal;
                 }
+                3 => {
+                    let item_a = &self.rows[a];
+                    let item_b = &self.rows[b];
+                    if item_a.is_folder() && item_b.is_folder() {
+                        return Ordering::Equal;
+                    }
+
+                    if item_a.is_folder() && item_b.is_file() {
+                        return Ordering::Less;
+                    }
+
+                    if item_a.is_file() && item_b.is_folder() {
+                        return Ordering::Greater;
+                    }
+
+                    let o = item_a.get_size().cmp(&item_b.get_size());
+                    if desc { o.reverse() } else { o }
+                }
                 _ => Ordering::Equal,
             }
         });
@@ -585,6 +664,20 @@ impl TableDelegate for ObjectTableDelegate {
         self.loading
     }
 
+    fn render_th(
+        &mut self,
+        col_ix: usize,
+        _: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        let col = &self.column(col_ix, cx);
+
+        div()
+            .size_full()
+            .text_align(col.align)
+            .child(col.name.clone())
+    }
+
     fn render_td(
         &mut self,
         row_ix: usize,
@@ -600,6 +693,7 @@ impl TableDelegate for ObjectTableDelegate {
 
         let name = &key[self.prefix.len()..];
         let is_folder = row.is_folder();
+        let file_size = row.get_size();
 
         match col_ix {
             0 => div()
@@ -627,7 +721,7 @@ impl TableDelegate for ObjectTableDelegate {
                 Button::new(format!("goto-folder-button-{}", key))
                     .label(name)
                     .text()
-                    .on_click(move |_, _, cx| {
+                    .on_click(move |_, window, cx| {
                         if is_folder {
                             let key_cloned = key_cloned.clone();
                             object_list_panel
@@ -637,8 +731,28 @@ impl TableDelegate for ObjectTableDelegate {
                                     panel.load_objects(cx);
                                 })
                                 .ok();
+                        } else {
+                            let key_cloned = key_cloned.clone();
+                            object_list_panel
+                                .update(cx, move |panel, cx| {
+                                    panel.show_object_meta(key_cloned, window, cx);
+                                })
+                                .ok();
                         }
                     })
+            }),
+            3 => div()
+                .size_full()
+                .text_align(TextAlign::Right)
+                .child(if is_folder {
+                    "-".to_string()
+                } else {
+                    format_file_size(file_size)
+                }),
+            4 => div().child(if let OssObjectItem::File(f) = row {
+                f.storage_class.to_string()
+            } else {
+                "-".to_string()
             }),
             _ => div(),
         }
@@ -653,5 +767,134 @@ impl TableDelegate for ObjectTableDelegate {
     ) {
         self.current_sort = Some((col_ix, sort));
         self.recompute();
+    }
+}
+
+struct ObjectMetaPanel {
+    ossclient: Arc<Client>,
+    bucket_name: String,
+    object_key: String,
+    load_task: Task<()>,
+    load_state: LoadState,
+    object_meta: Option<ObjectMetadata>,
+}
+
+impl ObjectMetaPanel {
+    fn new(
+        ossclient: Arc<Client>,
+        bucket_name: String,
+        object_key: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let this = Self {
+            ossclient,
+            bucket_name,
+            object_key,
+            load_task: Task::ready(()),
+            load_state: LoadState::Idle,
+            object_meta: None,
+        };
+
+        cx.on_next_frame(window, |this, _, cx| {
+            this.load_object_metadata(cx);
+        });
+
+        this
+    }
+
+    fn load_object_metadata(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.load_state, LoadState::Loading) {
+            return;
+        }
+
+        self.load_state = LoadState::Loading;
+        cx.notify();
+
+        let client = self.ossclient.clone();
+        let bucket_name = self.bucket_name.clone();
+        let object_key = self.object_key.clone();
+        let handle = tokio_runtime().handle().clone();
+
+        self.load_task = cx.spawn(async move |this, cx| {
+            let join = handle.spawn(async move { client.head_object(bucket_name, object_key, None).await });
+            let _abort_on_drop = AbortOnDrop(join.abort_handle());
+
+            let result = match join.await {
+                Ok(Ok(meta)) => Ok(meta),
+                Ok(Err(e)) => Err(anyhow::anyhow!("{e}")),
+                Err(join_err) => Err(anyhow::anyhow!("oss task failed: {join_err}")),
+            };
+
+            this.update_in(cx, |this, window, cx| {
+                match result {
+                    Ok(meta) => {
+                        this.object_meta = Some(meta);
+                        this.load_state = LoadState::Loaded;
+                    },
+                    Err(e) => {
+                        this.load_state = LoadState::Failed;
+                        window.push_notification((NotificationType::Error, e.to_string()), cx);
+                    }
+                }
+
+                cx.notify();
+            })
+            .ok();
+        });
+    }
+
+    fn render_detail(&self) -> Div {
+        if let Some(meta) = &self.object_meta {
+            div().child(
+                DescriptionList::horizontal()
+                    .columns(1)
+                    .item("Key", self.object_key.as_str(), 1)
+                    .item("Size", format_file_size(meta.content_length), 1)
+                    .item("ETag", meta.etag.as_str(), 1)
+                    .item(
+                        "Last modified",
+                        meta.last_modified
+                            .as_ref()
+                            .map(|s| format_datetime(s.as_str()))
+                            .unwrap_or("".to_string()),
+                        1,
+                    )
+                    .item(
+                        "Last accessed",
+                        meta.last_access_time
+                            .as_ref()
+                            .map(|s| format_datetime(s.as_str()))
+                            .unwrap_or("".to_string()),
+                        1,
+                    )
+                    .children(
+                        meta.metadata.iter().map(|(k, v)| {
+                            DescriptionItem::new(k.as_str()).value(v.as_str()).span(1)
+                        }),
+                    ),
+            )
+        } else {
+            div().text_center().child("Something went wrong...")
+        }
+    }
+}
+
+impl Render for ObjectMetaPanel {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .size_full()
+            .border_t_1()
+            .border_color(cx.theme().border)
+            .p_4()
+            .child(match self.load_state {
+                LoadState::Idle => div(),
+                LoadState::Loading => div()
+                    .h_flex()
+                    .justify_center()
+                    .child(ProgressCircle::new("bucket-detail-loading")),
+                LoadState::Loaded => self.render_detail(),
+                LoadState::Failed => div().child("Failed"),
+            })
     }
 }

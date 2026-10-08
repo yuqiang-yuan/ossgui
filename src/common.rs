@@ -31,6 +31,7 @@ impl Drop for AbortOnDrop {
 }
 
 /// OSS 返回的是 RFC3339 UTC，例如 "2015-04-29T02:44:22.000Z"
+#[allow(dead_code)]
 pub fn format_date(raw: &str) -> String {
     match DateTime::parse_from_rfc3339(raw) {
         Ok(dt) => dt
@@ -40,15 +41,32 @@ pub fn format_date(raw: &str) -> String {
         Err(_) => raw.to_string(), // 解析失败原样显示，别 panic
     }
 }
-
-/// OSS 返回的是 RFC3339 UTC，例如 "2015-04-29T02:44:22.000Z"
+/// OSS 的两种时间格式都吃：
+/// - RFC 3339：`2015-04-29T02:44:22.000Z`（bucket 的 creation_date）
+/// - RFC 2822：`Tue, 18 Feb 2025 15:03:23 GMT`（object 的 last_modified / HTTP 头）
 pub fn format_datetime(raw: &str) -> String {
-    match DateTime::parse_from_rfc3339(raw) {
-        Ok(dt) => dt
-            .with_timezone(&Local)
-            .format("%Y-%m-%d %H:%M:%S")
-            .to_string(),
-        Err(_) => raw.to_string(), // 解析失败原样显示，别 panic
+    let parsed = DateTime::parse_from_rfc3339(raw)
+        .or_else(|_| DateTime::parse_from_rfc2822(raw));
+
+    match parsed {
+        Ok(dt) => dt.with_timezone(&Local).format("%Y-%m-%d %H:%M:%S").to_string(),
+        Err(_) => raw.to_string(),
+    }
+}
+
+/// 把字节数格式化成 B / KB / MB / GB（1024 进制），KB 以上保留 1 位小数
+pub fn format_file_size(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
+    let mut size = bytes as f64;
+    let mut unit = 0;
+    while size >= 1024.0 && unit < UNITS.len() - 1 {
+        size /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{} {}", bytes, UNITS[0]) // 字节是整数，别显示成 123.0 B
+    } else {
+        format!("{:.1} {}", size, UNITS[unit])
     }
 }
 

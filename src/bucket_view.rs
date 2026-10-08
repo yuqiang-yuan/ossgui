@@ -7,22 +7,12 @@ use ali_oss_rs::{
     common::StorageClass,
 };
 use gpui_kit::{
-    App, AppContext, Context, Div, Entity, Hsla, IntoElement, ParentElement, Render, Styled,
-    Subscription, Task, TextAlign, WeakEntity, Window,
-    assets::IconName,
-    base::{
+    App, AppContext, Context, Div, Entity, Hsla, IntoElement, ParentElement, Render, Styled, Subscription, Task, TextAlign, WeakEntity, Window, assets::IconName, base::{
         Disableable, Placement, StyledExt,
         input::{InputEvent, InputState},
-    },
-    component::{
-        ActiveTheme, Icon, Sizable, WindowExt,
-        button::{Button, ButtonVariants},
-        input::Input,
-        notification::NotificationType,
-        progress::ProgressCircle,
-        table::{Column, ColumnSort, DataTable, TableDelegate, TableState},
-    },
-    div, px,
+    }, component::{
+        ActiveTheme, Icon, Sizable, WindowExt, button::{Button, ButtonVariants}, description_list::DescriptionList, input::Input, notification::NotificationType, progress::ProgressCircle, table::{Column, ColumnSort, DataTable, TableDelegate, TableState},
+    }, div, px,
 };
 
 use crate::{
@@ -569,7 +559,7 @@ impl BucketDetailPanel {
     fn render_detail(&self) -> Div {
         if let Some(d) = &self.bucket_detail {
             div().child(
-                gpui_kit::component::description_list::DescriptionList::horizontal()
+                DescriptionList::horizontal()
                     .columns(1)
                     .item("Name", d.name.as_str(), 1)
                     .item("Location", d.location.as_str(), 1)
