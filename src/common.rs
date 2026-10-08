@@ -13,7 +13,7 @@ pub fn tokio_runtime() -> &'static tokio::runtime::Runtime {
     })
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoadState {
     Idle,
     Loading,

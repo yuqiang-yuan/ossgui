@@ -50,7 +50,7 @@ impl MainView {
         Self {
             focus_handle,
             menubar: AppMenuBar::new(cx),
-            show_fps: true,
+            show_fps: false,
             bucket_list_panel: cx.new(|cx| BucketListPanel::new(this_weak.clone(), ossclient.clone(), window, cx)),
             object_list_panel: None,
             bucket_name: None,

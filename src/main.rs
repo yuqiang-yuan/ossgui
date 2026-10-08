@@ -1,23 +1,28 @@
+mod actions;
 mod assets;
-mod settings;
+mod bucket_view;
+mod common;
 mod globals;
 mod main_view;
-mod actions;
-mod common;
-mod bucket_view;
 mod object_view;
+mod settings;
 
 #[cfg(target_os = "linux")]
 use gpui_kit::WindowDecorations;
 use gpui_kit::{
-    AppContext, WindowBounds, WindowKind, WindowOptions, component::{Theme, ThemeMode, ThemeRegistry, TitleBar}, px, size,
+    AppContext, WindowBounds, WindowKind, WindowOptions,
+    component::{Theme, ThemeMode, ThemeRegistry, TitleBar},
+    px, size,
 };
+use reqwest_client::ReqwestClient;
 
 use crate::{assets::AppAssets, globals::APP_ID, main_view::MainView, settings::AppSettings};
 
 fn main() {
     dotenvy::dotenv().ok();
-    let app = gpui_kit::application().with_assets(AppAssets);
+    let app = gpui_kit::application()
+        .with_assets(AppAssets)
+        .with_http_client(std::sync::Arc::new(ReqwestClient::new()));
     app.run(|cx| {
         gpui_kit::init(cx);
         cx.set_app_identity(APP_ID, "Ossgui");
@@ -69,17 +74,21 @@ fn main() {
             println!("saving settings before quit");
             snapshot.save();
             async {}
-        }).detach();
+        })
+        .detach();
 
         cx.spawn(async move |cx| {
             cx.update(move |cx| {
                 let is_max = settings.window_maximized.unwrap_or(false);
 
                 // TODO: Test if the window bounds over the screen's bounds.
-                let bounds = WindowBounds::centered(size(
-                    px(settings.window_width.unwrap_or(1200.0)),
-                    px(settings.window_height.unwrap_or(800.0)),
-                ), cx);
+                let bounds = WindowBounds::centered(
+                    size(
+                        px(settings.window_width.unwrap_or(1200.0)),
+                        px(settings.window_height.unwrap_or(800.0)),
+                    ),
+                    cx,
+                );
 
                 let options = WindowOptions {
                     window_bounds: if is_max {
@@ -94,11 +103,10 @@ fn main() {
                     ..TitleBar::window_options()
                 };
 
-                let (_, _) =
-                    gpui_kit::open_window(options, cx, |window, cx| {
-                        cx.new(|cx| MainView::new(window, cx))
-                    })
-                    .expect("Launch application failed");
+                let (_, _) = gpui_kit::open_window(options, cx, |window, cx| {
+                    cx.new(|cx| MainView::new(window, cx))
+                })
+                .expect("Launch application failed");
 
                 cx.activate(true);
             });

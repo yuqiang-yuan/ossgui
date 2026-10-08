@@ -4,13 +4,14 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-ali-oss-rs = "0.2.5"
+ali-oss-rs = "^0.3.0"
 anyhow = "1.0.104"
 chrono = "0.4.45"
 dirs = "7.0.0"
 dotenvy = "0.15.7"
 gpui-fps = "0.7.0"
 gpui-kit = "^0.7"
+gpui-pre-reqwest-client = "0.3.8"
 rust-embed = "8.12.0"
 schemars = "1.2.2"
 serde = { version = "1.0.229", features = ["derive"] }

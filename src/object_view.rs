@@ -6,10 +6,13 @@ use ali_oss_rs::{
     bucket_common::{ListObjectsOptionsBuilder, ListObjectsResult, ObjectSummary},
     object::ObjectOperations,
     object_common::ObjectMetadata,
+    presign_common::PresignGetOptionsBuilder,
 };
 use gpui_kit::{
-    App, AppContext, Context, Div, Entity, IntoElement, ParentElement, Render, Styled,
-    Subscription, Task, TextAlign, WeakEntity, Window,
+    App, AppContext, Context, Div, Element, Entity,
+    ImageSource::Resource,
+    InteractiveElement, IntoElement, ParentElement, Render, Styled, StyledImage, Subscription,
+    Task, TextAlign, WeakEntity, Window,
     assets::IconName,
     base::{
         Disableable, IndexPath, Placement, StyledExt,
@@ -27,7 +30,7 @@ use gpui_kit::{
         select::{Select, SelectEvent, SelectState},
         table::{Column, ColumnSort, DataTable, TableDelegate, TableState},
     },
-    div, px,
+    div, img, px,
 };
 
 use crate::{
@@ -138,7 +141,7 @@ impl ObjectListPanel {
     }
 
     fn load_objects(&mut self, cx: &mut Context<Self>) {
-        if matches!(self.load_state, LoadState::Loading) {
+        if self.load_state == LoadState::Loading {
             return;
         }
 
@@ -186,14 +189,13 @@ impl ObjectListPanel {
                                 name,
                                 prefix,
                                 max_keys,
-                                delimiter,
-                                start_after,
                                 is_truncated,
                                 key_count,
                                 continuation_token,
                                 next_continuation_token,
                                 common_prefixes,
                                 contents,
+                                ..
                             } = results;
 
                             println!("list objects result: name: {name}, max keys: {max_keys}, key count: {key_count}, continuation token: {:?}, next continuation token: {:?}", continuation_token, next_continuation_token);
@@ -341,7 +343,7 @@ impl ObjectListPanel {
             .collect::<Vec<_>>()
     }
 
-    fn actions_bar(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn actions_bar(&self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         div()
             .px_2()
             .w_full()
@@ -406,14 +408,14 @@ impl ObjectListPanel {
                     .tooltip("Next page")
                     .icon(IconName::ChevronRight)
                     .disabled(!self.is_truncated)
-                    .loading(matches!(self.load_state, LoadState::Loading))
+                    .loading(self.load_state == LoadState::Loading)
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.load_objects(cx);
                     })),
             )
     }
 
-    fn show_object_meta(
+    fn show_object_detail(
         &mut self,
         object_key: String,
         window: &mut Window,
@@ -425,10 +427,7 @@ impl ObjectListPanel {
             cx.new(|cx| ObjectMetaPanel::new(client, bucket_name, object_key.clone(), window, cx));
 
         window.open_sheet_at(Placement::Right, cx, move |sheet, _, _| {
-            sheet
-                .p_0()
-                .title("Object meta")
-                .child(meta_panel.clone())
+            sheet.p_0().title("Object detail").child(meta_panel.clone())
         });
     }
 }
@@ -573,11 +572,11 @@ impl ObjectTableDelegate {
             return; // 没有排序 → 自然序，完事
         };
 
-        if matches!(sort, ColumnSort::Default) {
+        if sort == ColumnSort::Default {
             return;
         }
 
-        let desc = matches!(sort, ColumnSort::Descending);
+        let desc = sort == ColumnSort::Descending;
         self.filtered_indexes.sort_by(|&a, &b| {
             match col_ix {
                 2 => {
@@ -735,7 +734,7 @@ impl TableDelegate for ObjectTableDelegate {
                             let key_cloned = key_cloned.clone();
                             object_list_panel
                                 .update(cx, move |panel, cx| {
-                                    panel.show_object_meta(key_cloned, window, cx);
+                                    panel.show_object_detail(key_cloned, window, cx);
                                 })
                                 .ok();
                         }
@@ -777,6 +776,7 @@ struct ObjectMetaPanel {
     load_task: Task<()>,
     load_state: LoadState,
     object_meta: Option<ObjectMetadata>,
+    presigned_url: Option<String>,
 }
 
 impl ObjectMetaPanel {
@@ -794,6 +794,7 @@ impl ObjectMetaPanel {
             load_task: Task::ready(()),
             load_state: LoadState::Idle,
             object_meta: None,
+            presigned_url: None,
         };
 
         cx.on_next_frame(window, |this, _, cx| {
@@ -804,7 +805,7 @@ impl ObjectMetaPanel {
     }
 
     fn load_object_metadata(&mut self, cx: &mut Context<Self>) {
-        if matches!(self.load_state, LoadState::Loading) {
+        if self.load_state == LoadState::Loading {
             return;
         }
 
@@ -817,7 +818,12 @@ impl ObjectMetaPanel {
         let handle = tokio_runtime().handle().clone();
 
         self.load_task = cx.spawn(async move |this, cx| {
-            let join = handle.spawn(async move { client.head_object(bucket_name, object_key, None).await });
+            let bucket_name_clone = bucket_name.clone();
+            let object_key_clone = object_key.clone();
+            let client_clone = client.clone();
+
+            let join = handle
+                .spawn(async move { client.head_object(&bucket_name, &object_key, None).await });
             let _abort_on_drop = AbortOnDrop(join.abort_handle());
 
             let result = match join.await {
@@ -829,9 +835,19 @@ impl ObjectMetaPanel {
             this.update_in(cx, |this, window, cx| {
                 match result {
                     Ok(meta) => {
+                        println!("{:?}", meta);
+                        this.presigned_url = Some(
+                            client_clone.presign_url(
+                                bucket_name_clone,
+                                object_key_clone,
+                                PresignGetOptionsBuilder::default()
+                                    .expires_seconds(120)
+                                    .build(),
+                            ),
+                        );
                         this.object_meta = Some(meta);
                         this.load_state = LoadState::Loaded;
-                    },
+                    }
                     Err(e) => {
                         this.load_state = LoadState::Failed;
                         window.push_notification((NotificationType::Error, e.to_string()), cx);
@@ -872,11 +888,77 @@ impl ObjectMetaPanel {
                         meta.metadata.iter().map(|(k, v)| {
                             DescriptionItem::new(k.as_str()).value(v.as_str()).span(1)
                         }),
+                    )
+                    .children(
+                        meta.raw_headers.iter().map(|(k, v)| {
+                            DescriptionItem::new(k.as_str()).value(v.as_str()).span(1)
+                        }),
                     ),
             )
         } else {
             div().text_center().child("Something went wrong...")
         }
+    }
+
+    fn render_preview(&self, cx: &mut Context<Self>) -> Div {
+        div()
+            .w_full()
+            .bg(cx.theme().secondary)
+            .border_1()
+            .border_color(cx.theme().border)
+            .rounded_md()
+            .child(if self.load_state == LoadState::Loaded {
+                if let Some(mime_type) = self
+                    .object_meta
+                    .as_ref()
+                    .map(|m| m.raw_headers.get("content-type"))
+                    .flatten()
+                    && mime_type.starts_with("image/")
+                    && let Some(url) = self.presigned_url.clone()
+                {
+                    let hint_text_color = cx.theme().secondary_foreground;
+                    let error_text_color = cx.theme().red;
+
+                    div().w_full().h_56().flex().overflow_hidden().child(
+                        img(url)
+                            .id(format!("{}/{}", self.bucket_name, self.object_key))
+                            .size_full()
+                            .object_fit(gpui_kit::ObjectFit::Contain)
+                            .with_loading(move || {
+                                div()
+                                    .size_full()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .text_sm()
+                                    .text_color(hint_text_color)
+                                    .child("Loading...")
+                                    .into_any_element()
+                            })
+                            .with_fallback(move || {
+                                div()
+                                    .size_full()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .text_sm()
+                                    .text_color(error_text_color)
+                                    .child("Failed to load image")
+                                    .into_any_element()
+                            }),
+                    )
+                } else {
+                    div()
+                        .size_full()
+                        .items_center()
+                        .justify_end()
+                        .text_sm()
+                        .text_color(cx.theme().secondary_foreground)
+                        .child("Preview not supported for this object")
+                }
+            } else {
+                div()
+            })
     }
 }
 
@@ -887,6 +969,20 @@ impl Render for ObjectMetaPanel {
             .border_t_1()
             .border_color(cx.theme().border)
             .p_4()
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().secondary_foreground)
+                    .child("Preview"),
+            )
+            .child(self.render_preview(cx))
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().secondary_foreground)
+                    .mt_4()
+                    .child("Metadata"),
+            )
             .child(match self.load_state {
                 LoadState::Idle => div(),
                 LoadState::Loading => div()
