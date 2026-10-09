@@ -1,7 +1,24 @@
 use gpui_kit::{AssetSource, SharedString};
 use rust_embed::Embed;
 
-gpui_kit::assets::icon_assets!(ExtraIcons, [CloudDownload, CloudUpload, ArrowDownToLine, Clipboard, ClipboardCopy, ClipboardPaste, ClipboardX, House, Trash, ArrowUpDown]);
+gpui_kit::assets::icon_assets!(
+    ExtraIcons,
+    [
+        CloudDownload,
+        CloudUpload,
+        ArrowDownToLine,
+        Clipboard,
+        ClipboardCopy,
+        ClipboardPaste,
+        ClipboardX,
+        House,
+        Trash,
+        ArrowUpDown,
+        TicketX,
+        CircleSlash2,
+        X
+    ]
+);
 
 #[derive(Embed)]
 #[folder = "assets"]

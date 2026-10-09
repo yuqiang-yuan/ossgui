@@ -3,17 +3,28 @@ use std::sync::Arc;
 use ali_oss_rs::Client;
 use gpui_fps::fps_monitor;
 use gpui_kit::{
-    App, AppContext, Context, Entity, FocusHandle, InteractiveElement, IntoElement, Menu, MenuItem, ParentElement, Render, Styled, Subscription, Window, assets::IconName, base::{Placement, StyledExt, resizable_panel}, component::{
+    App, AppContext, Context, Entity, FocusHandle, InteractiveElement, IntoElement, Menu, MenuItem,
+    ParentElement, Render, Styled, Subscription, Window,
+    assets::IconName,
+    base::{Placement, StyledExt, resizable_panel},
+    component::{
         ActiveTheme, Sizable, Theme, ThemeMode, TitleBar,
         button::{Button, ButtonVariants},
         h_resizable,
         menu::{AppMenuBar, DropdownMenu, PopupMenuItem},
         status_bar::StatusBar,
-    }, div, prelude::FluentBuilder, px,
+    },
+    div,
+    prelude::FluentBuilder,
+    px,
 };
 
 use crate::{
-    actions::{AboutAction, QuitAction}, bucket_view::BucketListPanel, job::{JobKind, JobPanel, JobQueue, JobsSummary}, object_view::ObjectListPanel, settings::AppSettings,
+    actions::{AboutAction, QuitAction},
+    bucket_view::BucketListPanel,
+    job::{JobKind, JobPanel, JobQueue, JobsSummary},
+    object_view::ObjectListPanel,
+    settings::AppSettings,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,6 +155,17 @@ impl MainView {
             .text_color(color)
             .on_click(cx.listener(|this, _, _, cx| {
                 this.jobs_open = !this.jobs_open;
+
+                // 展开面板时重新测量宽度
+                // if this.jobs_open {
+                //     let panel = this.job_panel.clone();
+                //     cx.on_next_frame(window, move |_, window, _| {
+                //         window.on_next_frame(move |_, cx| {
+                //             panel.update(cx, |panel, cx| panel.refresh_list(cx));
+                //         });
+                //     });
+                // }
+
                 cx.notify();
             }))
     }
@@ -212,9 +234,28 @@ impl Render for MainView {
                             .child(
                                 resizable_panel()
                                     .size(px(300.0))
-                                    .size_range(px(280.0)..px(400.0))
+                                    // .size_range(px(300.0)..px(400.0))
                                     .visible(self.jobs_open)
-                                    .child(self.job_panel.clone()),
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .size_full()
+                                            .v_flex()
+                                            .child(
+                                                div()
+                                                    .p_2()
+                                                    .border_b_1()
+                                                    .border_color(cx.theme().border)
+                                                    .child("Tasks"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .w_full()
+                                                    .p_2()
+                                                    .flex_grow_1()
+                                                    .child(self.job_panel.clone()),
+                                            ),
+                                    ),
                             ),
                     )
                     .when(self.show_fps, |this| this.child(fps_monitor(window, cx))),

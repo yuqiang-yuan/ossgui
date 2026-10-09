@@ -115,3 +115,12 @@ pub fn oss_region_map() -> &'static HashMap<&'static str, &'static str> {
         ])
     })
 }
+
+/// Extract the file name from object key
+pub fn file_name(s: &str) -> &str {
+    let Some(pos) = s.rfind('/') else {
+        return s;
+    };
+
+    &s[pos +1..]
+}

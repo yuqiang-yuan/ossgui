@@ -8,12 +8,29 @@
 //!
 
 use std::{
-    collections::{HashMap, VecDeque}, path::PathBuf, sync::Arc, time::Duration,
+    collections::{HashMap, VecDeque},
+    path::PathBuf,
+    sync::Arc,
+    time::Duration,
 };
 
 use ali_oss_rs::Client;
-use gpui_kit::{App, AppContext, Context, Entity, InteractiveElement, IntoElement, ParentElement, Render, RenderOnce, Styled, Subscription, Task, Window, base::{IndexPath, Selectable, StyledExt, h_flex}, component::list::{List, ListDelegate, ListState}, div};
+use gpui_kit::{
+    App, AppContext, Context, Entity, InteractiveElement, IntoElement, ParentElement, Render,
+    RenderOnce, Styled, Subscription, Task, Window,
+    assets::IconName,
+    base::{IndexPath, Selectable, StyledExt, h_flex},
+    component::{
+        ActiveTheme, Icon, Sizable,
+        button::{Button, ButtonVariants},
+        list::{List, ListDelegate, ListState},
+        progress::ProgressCircle,
+    },
+    div,
+};
 use tokio::sync::{mpsc, watch};
+
+use crate::common::file_name;
 
 /// 上传走分片的下限：小于它用一次 PutObject 完成，中途无法暂停
 const MULTIPART_THRESHOLD: u64 = 50 * 1024 * 1024;
@@ -82,6 +99,24 @@ pub enum JobKind {
     DeletePrefix { bucket_name: String, prefix: String },
 }
 
+impl JobKind {
+    /// 获取在 UI 上显示的文本
+    fn get_label(&self) -> &str {
+        match self {
+            JobKind::Upload { object_key, .. } => file_name(object_key.as_str()),
+            JobKind::Download { object_key, .. } => file_name(object_key.as_str()),
+            JobKind::Delete { object_keys, .. } => {
+                if let Some(s) = object_keys.first() {
+                    file_name(s)
+                } else {
+                    ""
+                }
+            }
+            JobKind::DeletePrefix { prefix, .. } => file_name(prefix.as_str()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 enum JobState {
     Queued,
@@ -132,7 +167,7 @@ struct JobCtl {
     abort: tokio::task::AbortHandle,
 }
 
-#[derive(Debug, Clone,)]
+#[derive(Debug, Clone)]
 enum JobError {
     Cancelled,
     Failed(String),
@@ -183,7 +218,7 @@ impl JobQueue {
         });
 
         Self {
-            jobs: Vec::new(),
+            jobs: gen_test_data(),
             queue_order: VecDeque::new(),
             running: HashMap::new(),
             in_flight: 0,
@@ -202,6 +237,10 @@ impl JobQueue {
         self.jobs.iter().find(|j| j.id == id)
     }
 
+    fn job_mut(&mut self, id: u64) -> Option<&mut Job> {
+        self.jobs.iter_mut().find(|j| j.id == id)
+    }
+
     pub fn summary(&self) -> JobsSummary {
         let mut s = JobsSummary {
             total: self.jobs.len(),
@@ -213,8 +252,8 @@ impl JobQueue {
                 JobState::Queued => s.queued += 1,
                 JobState::Running { .. } => s.running += 1,
                 JobState::Failed { .. } => s.failed += 1,
-                JobState::Completed => {},
-                JobState::Cancelled => {},
+                JobState::Completed => {}
+                JobState::Cancelled => {}
             }
         }
 
@@ -222,7 +261,7 @@ impl JobQueue {
     }
 
     fn set_state(&mut self, id: u64, state: JobState) {
-        if let Some(job) = self.jobs.iter_mut().find(|j| j.id == id) {
+        if let Some(job) = self.job_mut(id) {
             job.state = state;
         }
     }
@@ -254,7 +293,7 @@ impl JobQueue {
         }
 
         for id in dispatch {
-            let Some(job) = self.jobs.iter().find(|j| j.id == id) else {
+            let Some(job) = self.job(id) else {
                 continue;
             };
             debug_assert!(
@@ -301,7 +340,7 @@ impl JobQueue {
     fn on_event(&mut self, ev: JobEvent, cx: &mut Context<Self>) {
         match ev {
             JobEvent::Progress { id, progress } => {
-                if let Some(job) = self.jobs.iter_mut().find(|j| j.id == id)
+                if let Some(job) = self.job_mut(id)
                     && let JobState::Running { progress: slot } = &mut job.state
                 {
                     *slot = progress;
@@ -346,7 +385,7 @@ impl JobQueue {
     }
 
     fn cancel(&mut self, id: u64, cx: &mut Context<Self>) {
-        let Some(job) = self.jobs.iter().find(|j| j.id == id) else {
+        let Some(job) = self.job(id) else {
             return;
         };
         if !job.can_cancel() {
@@ -393,9 +432,21 @@ mod runner {
             let id = run.id;
             let outcome = match &run.kind {
                 JobKind::Upload { .. } => run_upload(&run, &tx, ctl).await,
-                JobKind::Download { .. } => async { println!("download job"); Ok(()) }.await,
+                JobKind::Download { .. } => {
+                    async {
+                        println!("download job");
+                        Ok(())
+                    }
+                    .await
+                }
                 JobKind::Delete { .. } => run_delete(&run, &tx, ctl).await,
-                JobKind::DeletePrefix { .. } => async { println!("delete prefix job"); Ok(()) }.await,
+                JobKind::DeletePrefix { .. } => {
+                    async {
+                        println!("delete prefix job");
+                        Ok(())
+                    }
+                    .await
+                }
             };
 
             let _ = tx.send(match outcome {
@@ -418,11 +469,23 @@ mod runner {
         }
     }
 
-    async fn run_upload(run: &JobRun, tx: &mpsc::UnboundedSender<JobEvent>, mut ctl: watch::Receiver<JobSignal>) -> Result<(), JobError> {
-        let JobKind::Upload { bucket_name, object_key, source, size } = &run.kind else { unreachable!() };
+    async fn run_upload(
+        run: &JobRun,
+        tx: &mpsc::UnboundedSender<JobEvent>,
+        mut ctl: watch::Receiver<JobSignal>,
+    ) -> Result<(), JobError> {
+        let JobKind::Upload {
+            bucket_name,
+            object_key,
+            source,
+            size,
+        } = &run.kind
+        else {
+            unreachable!()
+        };
 
         match checkpoint(&ctl) {
-            Checkpoint::Continue => {},
+            Checkpoint::Continue => {}
             Checkpoint::Cancel => return Err(JobError::Cancelled),
         }
 
@@ -438,15 +501,25 @@ mod runner {
         Ok(())
     }
 
-    async fn run_delete(run: &JobRun, tx: &mpsc::UnboundedSender<JobEvent>, mut ctl: watch::Receiver<JobSignal>) -> Result<(), JobError> {
-        let JobKind::Delete { bucket_name, object_keys } = &run.kind else { unreachable!() };
+    async fn run_delete(
+        run: &JobRun,
+        tx: &mpsc::UnboundedSender<JobEvent>,
+        mut ctl: watch::Receiver<JobSignal>,
+    ) -> Result<(), JobError> {
+        let JobKind::Delete {
+            bucket_name,
+            object_keys,
+        } = &run.kind
+        else {
+            unreachable!()
+        };
 
         let total = object_keys.len() as u64;
         let mut done = 0u64;
 
         for chunk in object_keys.chunks(PAGE_SIZE as usize) {
             match checkpoint(&ctl) {
-                Checkpoint::Continue => {},
+                Checkpoint::Continue => {}
                 Checkpoint::Cancel => return Err(JobError::Cancelled),
             }
 
@@ -457,7 +530,13 @@ mod runner {
             }
 
             done = done + chunk.len() as u64;
-            let _ = tx.send(JobEvent::Progress { id: run.id, progress: JobProgress { done, total: Some(total) } });
+            let _ = tx.send(JobEvent::Progress {
+                id: run.id,
+                progress: JobProgress {
+                    done,
+                    total: Some(total),
+                },
+            });
         }
         Ok(())
     }
@@ -494,7 +573,11 @@ struct JobRow {
 
 impl JobRow {
     fn new(id: u64, queue: Entity<JobQueue>) -> Self {
-        Self { id, queue, selected: false, }
+        Self {
+            id,
+            queue,
+            selected: false,
+        }
     }
 }
 
@@ -512,13 +595,82 @@ impl Selectable for JobRow {
 impl RenderOnce for JobRow {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let queue = self.queue.read(cx);
-        let Some(job) = queue.jobs().iter().find(|j| j.id == self.id) else {
+        let Some(job) = queue.job(self.id) else {
             return div().into_any_element();
         };
 
-        div().id(format!("job-row-{}", self.id))
+        let label = job.kind.get_label().to_string();
+
+        let icon = match &job.state {
+            JobState::Queued => match &job.kind {
+                JobKind::Upload { .. } => Icon::new(IconName::CloudUpload)
+                    .text_color(cx.theme().primary)
+                    .into_any_element(),
+                JobKind::Download { .. } => Icon::new(IconName::CloudDownload)
+                    .text_color(cx.theme().colors.magenta)
+                    .into_any_element(),
+                JobKind::Delete { .. } => Icon::new(IconName::TicketX)
+                    .text_color(cx.theme().colors.red)
+                    .into_any_element(),
+                JobKind::DeletePrefix { .. } => Icon::new(IconName::TicketX)
+                    .text_color(cx.theme().colors.red)
+                    .into_any_element(),
+            },
+            JobState::Running { progress } => ProgressCircle::new(format!("loading-{}", self.id))
+                .loading(progress.total.is_none())
+                .value(progress.percent())
+                .size_4()
+                .into_any_element(),
+            JobState::Completed => Icon::new(IconName::Check)
+                .text_color(cx.theme().colors.success)
+                .into_any_element(),
+            JobState::Failed { .. } => Icon::new(IconName::TriangleAlert)
+                .text_color(cx.theme().colors.danger)
+                .into_any_element(),
+            JobState::Cancelled => Icon::new(IconName::CircleSlash2)
+                .text_color(cx.theme().secondary_foreground)
+                .into_any_element(),
+        };
+
+        let row_ui_id = format!("job-row-{}", self.id);
+
+        div()
+            .id(row_ui_id.clone())
+            .group(row_ui_id.clone())
+            .min_w_0()
+            .w_full()
+            .p_2()
+            .rounded_md()
+            .hover(|s| s.bg(cx.theme().list_hover))
             .h_flex()
-            .child("job row").into_any_element()
+            .items_center()
+            .gap_1()
+            .child(div().flex_shrink_0().child(icon))
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_grow_1()
+                    .text_sm()
+                    .truncate()
+                    .child(label),
+            )
+            .child(
+                div()
+                    .size_6()
+                    .flex_shrink_0()
+                    .invisible()
+                    .group_hover(row_ui_id.clone(), |s| s.visible())
+                    .child(
+                        Button::new(format!("cancel-button-{}", self.id))
+                            .small()
+                            .icon(IconName::X)
+                            .ghost()
+                            .danger()
+                            .rounded_full()
+                            .tooltip("Cancel"),
+                    ),
+            )
+            .into_any_element()
     }
 }
 
@@ -564,8 +716,14 @@ pub struct JobPanel {
 
 impl JobPanel {
     pub fn new(queue: Entity<JobQueue>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let sub = cx.observe(&queue, |_, _, cx| cx.notify());
-        let delegate = JobListDelegate { queue: queue.clone(), selected_index: None };
+        let sub = cx.observe(&queue, |this, _, cx| {
+            this.list_state.update(cx, |_, cx| cx.notify());
+            cx.notify();
+        });
+        let delegate = JobListDelegate {
+            queue: queue.clone(),
+            selected_index: None,
+        };
         let list_state = cx.new(|cx| ListState::new(delegate, window, cx));
 
         Self {
@@ -574,10 +732,244 @@ impl JobPanel {
             _subs: vec![sub],
         }
     }
+
+    /// 让 List 重新测量布局。
+    /// VirtualList 首次布局时还不知道可用宽度（last_content_size 为空），
+    /// 会用一个不受约束的宽度量样例行，导致 content_size.width 偏大。
+    /// 补一次布局就能拿到正确宽度。
+    pub fn refresh_list(&mut self, cx: &mut Context<Self>) {
+        self.list_state.update(cx, |_, cx| cx.notify());
+    }
 }
 
 impl Render for JobPanel {
-    fn render(&mut self, window: &mut gpui_kit::Window, cx: &mut Context<Self>) -> impl gpui_kit::prelude::IntoElement {
-        div().size_full().child(List::new(&self.list_state).size_full())
+    fn render(
+        &mut self,
+        window: &mut gpui_kit::Window,
+        cx: &mut Context<Self>,
+    ) -> impl gpui_kit::prelude::IntoElement {
+        div()
+            .size_full()
+            .child(List::new(&self.list_state).size_full())
     }
+}
+
+fn gen_test_data() -> Vec<Job> {
+    vec![
+        // ---------------- Upload × 5 state ----------------
+        Job {
+            id: 1,
+            kind: JobKind::Upload {
+                bucket_name: "demo-hangzhou".into(),
+                object_key: "photos/2026/IMG_0001.jpg".into(),
+                source: "/tmp/IMG_0001.jpg".into(),
+                size: 44_040_192,
+            },
+            client: Arc::new(Client::from_env()),
+            state: JobState::Queued,
+        },
+        Job {
+            id: 2,
+            kind: JobKind::Upload {
+                bucket_name: "demo-hangzhou".into(),
+                object_key: "photos/2026/IMG_0001.jpg".into(),
+                source: "/tmp/IMG_0001.jpg".into(),
+                size: 44_040_192,
+            },
+            client: Arc::new(Client::from_env()),
+            state: JobState::Running {
+                progress: JobProgress::unknown(),
+            },
+        },
+        Job {
+            id: 3,
+            kind: JobKind::Upload {
+                bucket_name: "demo-hangzhou".into(),
+                object_key: "photos/2026/IMG_0001.jpg".into(),
+                source: "/tmp/IMG_0001.jpg".into(),
+                size: 44_040_192,
+            },
+            client: Arc::new(Client::from_env()),
+            state: JobState::Completed,
+        },
+        Job {
+            id: 4,
+            kind: JobKind::Upload {
+                bucket_name: "demo-hangzhou".into(),
+                object_key: "photos/2026/IMG_0001.jpg".into(),
+                source: "/tmp/IMG_0001.jpg".into(),
+                size: 44_040_192,
+            },
+            client: Arc::new(Client::from_env()),
+            state: JobState::Failed {
+                message: "AccessDenied: Access denied by bucket policy.".into(),
+            },
+        },
+        Job {
+            id: 5,
+            kind: JobKind::Upload {
+                bucket_name: "demo-hangzhou".into(),
+                object_key: "photos/2026/IMG_0001.jpg".into(),
+                source: "/tmp/IMG_0001.jpg".into(),
+                size: 44_040_192,
+            },
+            client: Arc::new(Client::from_env()),
+            state: JobState::Cancelled,
+        },
+        // ---------------- Download × 5 state ----------------
+        Job {
+            id: 6,
+            kind: JobKind::Download {
+                bucket_name: "demo-beijing".into(),
+                object_key: "docs/2026/q3-report-final-v7.pdf".into(),
+                target: "/tmp/q3-report-final-v7.pdf".into(),
+            },
+            client: Arc::new(Client::from_env()),
+            state: JobState::Queued,
+        },
+        Job {
+            id: 7,
+            kind: JobKind::Download {
+                bucket_name: "demo-beijing".into(),
+                object_key: "docs/2026/q3-report-final-v7.pdf".into(),
+                target: "/tmp/q3-report-final-v7.pdf".into(),
+            },
+            client: Arc::new(Client::from_env()),
+            state: JobState::Running {
+                progress: JobProgress::unknown(),
+            },
+        },
+        Job {
+            id: 8,
+            kind: JobKind::Download {
+                bucket_name: "demo-beijing".into(),
+                object_key: "docs/2026/q3-report-final-v7.pdf".into(),
+                target: "/tmp/q3-report-final-v7.pdf".into(),
+            },
+            client: Arc::new(Client::from_env()),
+            state: JobState::Completed,
+        },
+        Job {
+            id: 9,
+            kind: JobKind::Download {
+                bucket_name: "demo-beijing".into(),
+                object_key: "docs/2026/q3-report-final-v7.pdf".into(),
+                target: "/tmp/q3-report-final-v7.pdf".into(),
+            },
+            client: Arc::new(Client::from_env()),
+            state: JobState::Failed {
+                message: "NoSuchKey: The specified key does not exist.".into(),
+            },
+        },
+        Job {
+            id: 10,
+            kind: JobKind::Download {
+                bucket_name: "demo-beijing".into(),
+                object_key: "docs/2026/q3-report-final-v7.pdf".into(),
+                target: "/tmp/q3-report-final-v7.pdf".into(),
+            },
+            client: Arc::new(Client::from_env()),
+            state: JobState::Cancelled,
+        },
+        // ---------------- Delete × 5 state ----------------
+        Job {
+            id: 11,
+            kind: JobKind::Delete {
+                bucket_name: "photos-prod".into(),
+                object_keys: vec!["cache/warehouse/session_events_2026_10_09.parquet".into()],
+            },
+            client: Arc::new(Client::from_env()),
+            state: JobState::Queued,
+        },
+        Job {
+            id: 12,
+            kind: JobKind::Delete {
+                bucket_name: "photos-prod".into(),
+                object_keys: vec!["cache/warehouse/session_events_2026_10_09.parquet".into()],
+            },
+            client: Arc::new(Client::from_env()),
+            state: JobState::Running {
+                progress: JobProgress { done: 1234, total: Some(2234) },
+            },
+        },
+        Job {
+            id: 13,
+            kind: JobKind::Delete {
+                bucket_name: "photos-prod".into(),
+                object_keys: vec!["cache/warehouse/session_events_2026_10_09.parquet".into()],
+            },
+            client: Arc::new(Client::from_env()),
+            state: JobState::Completed,
+        },
+        Job {
+            id: 14,
+            kind: JobKind::Delete {
+                bucket_name: "photos-prod".into(),
+                object_keys: vec!["cache/warehouse/session_events_2026_10_09.parquet".into()],
+            },
+            client: Arc::new(Client::from_env()),
+            state: JobState::Failed {
+                message: "AccessDenied: Access denied by bucket policy.".into(),
+            },
+        },
+        Job {
+            id: 15,
+            kind: JobKind::Delete {
+                bucket_name: "photos-prod".into(),
+                object_keys: vec!["cache/warehouse/session_events_2026_10_09.parquet".into()],
+            },
+            client: Arc::new(Client::from_env()),
+            state: JobState::Cancelled,
+        },
+        // ---------------- DeletePrefix × 5 state ----------------
+        Job {
+            id: 16,
+            kind: JobKind::DeletePrefix {
+                bucket_name: "backup-cold".into(),
+                prefix: "archive/2025/backup/".into(),
+            },
+            client: Arc::new(Client::from_env()),
+            state: JobState::Queued,
+        },
+        Job {
+            id: 17,
+            kind: JobKind::DeletePrefix {
+                bucket_name: "backup-cold".into(),
+                prefix: "archive/2025/backup/".into(),
+            },
+            client: Arc::new(Client::from_env()),
+            state: JobState::Running {
+                progress: JobProgress::unknown(),
+            },
+        },
+        Job {
+            id: 18,
+            kind: JobKind::DeletePrefix {
+                bucket_name: "backup-cold".into(),
+                prefix: "archive/2025/backup/".into(),
+            },
+            client: Arc::new(Client::from_env()),
+            state: JobState::Completed,
+        },
+        Job {
+            id: 19,
+            kind: JobKind::DeletePrefix {
+                bucket_name: "backup-cold".into(),
+                prefix: "archive/2025/backup/".into(),
+            },
+            client: Arc::new(Client::from_env()),
+            state: JobState::Failed {
+                message: "NoSuchBucket: The specified bucket does not exist.".into(),
+            },
+        },
+        Job {
+            id: 20,
+            kind: JobKind::DeletePrefix {
+                bucket_name: "backup-cold".into(),
+                prefix: "archive/2025/backup/".into(),
+            },
+            client: Arc::new(Client::from_env()),
+            state: JobState::Cancelled,
+        },
+    ]
 }
