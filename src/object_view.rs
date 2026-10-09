@@ -1,4 +1,4 @@
-use std::{cmp::Ordering, sync::Arc};
+use std::{cmp::Ordering, collections::HashSet, sync::Arc};
 
 use ali_oss_rs::{
     Client,
@@ -9,14 +9,10 @@ use ali_oss_rs::{
     presign_common::PresignGetOptionsBuilder,
 };
 use gpui_kit::{
-    App, AppContext, Context, Div, Entity, InteractiveElement, IntoElement, ParentElement, Render,
-    Styled, StyledImage, Subscription, Task, TextAlign, WeakEntity, Window,
-    assets::IconName,
-    base::{
+    App, AppContext, Context, Div, Entity, InteractiveElement, IntoElement, ParentElement, PathPromptOptions, Render, Styled, StyledImage, Subscription, Task, TextAlign, WeakEntity, Window, assets::IconName, base::{
         Disableable, IndexPath, Placement, StyledExt,
         input::{InputEvent, InputState},
-    },
-    component::{
+    }, component::{
         ActiveTheme, Icon, Sizable, WindowExt,
         button::{Button, ButtonVariants},
         checkbox::Checkbox,
@@ -27,16 +23,13 @@ use gpui_kit::{
         progress::ProgressCircle,
         select::{Select, SelectEvent, SelectState},
         table::{Column, ColumnSort, DataTable, TableDelegate, TableState},
-    },
-    div, img, px,
+    }, div, img, px,
 };
 
 use crate::{
-    actions::{CopyAction, CutAction, DeleteAction, PasteAction},
-    common::{
+    actions::{CopyAction, CutAction, DeleteAction, OpenFilesForUploadAction, OpenFolderForUploadAction, PasteAction}, common::{
         AbortOnDrop, LoadState, format_datetime, format_file_size, oss_region_map, tokio_runtime,
-    },
-    main_view::MainView,
+    }, job::JobKind, main_view::MainView,
 };
 
 pub struct ObjectListPanel {
@@ -203,8 +196,8 @@ impl ObjectListPanel {
 
                             this.is_truncated = is_truncated;
                             this.next_continuation_token = next_continuation_token;
-                            // common_prefixes.iter().for_each(|c| println!("prefix: {prefix}, common prefix: {c}"));
-                            // contents.iter().for_each(|f| println!("prefix: {prefix}, object: {}", f.key));
+                            common_prefixes.iter().for_each(|c| println!("prefix: {prefix}, common prefix: {c}"));
+                            contents.iter().for_each(|f| println!("prefix: {prefix}, object: {}", f.key));
 
                             let mut rows = common_prefixes
                                 .into_iter()
@@ -215,7 +208,7 @@ impl ObjectListPanel {
                             rows.extend(
                                 contents
                                     .into_iter()
-                                    .filter(|o| !prefix.is_empty() && o.key != prefix)
+                                    .filter(|o| o.key != prefix)
                                     .map(|s| OssObjectItem::File(s)),
                             );
 
@@ -360,12 +353,17 @@ impl ObjectListPanel {
             .child(div().flex_grow_1())
             .child(
                 Button::new("upload-button")
-                    .icon(Icon::default().path("icons/cloud-upload.svg"))
-                    .label("Upload"),
+                    .icon(IconName::CloudUpload)
+                    .label("Upload")
+                    .dropdown_caret(true)
+                    .dropdown_menu(|menu, _, _| {
+                        menu.menu("Files", Box::new(OpenFilesForUploadAction))
+                            .menu("Folders", Box::new(OpenFolderForUploadAction))
+                    }),
             )
             .child(
                 Button::new("download-button")
-                    .icon(Icon::default().path("icons/cloud-download.svg"))
+                    .icon(IconName::CloudDownload)
                     .label("Download"),
             )
             .child(
@@ -474,7 +472,8 @@ impl ObjectListPanel {
         let handle = tokio_runtime().handle().clone();
 
         self.create_folder_task = cx.spawn(async move |this, cx| {
-            let join = handle.spawn(async move { client.create_folder(bucket_name, folder_object_key).await });
+            let join = handle
+                .spawn(async move { client.create_folder(bucket_name, folder_object_key).await });
             let _abort_on_drop = AbortOnDrop(join.abort_handle());
 
             let result = match join.await {
@@ -483,22 +482,58 @@ impl ObjectListPanel {
                 Err(e) => Err(anyhow::anyhow!("{e}")),
             };
 
-            this.update_in(cx, |this, window, cx| {
-                match result {
-                    Ok(_) => this.load_objects(cx),
-                    Err(e) => {
-                        let msg = e.to_string();
-                        window.push_notification((NotificationType::Error, msg), cx);
-                    },
+            this.update_in(cx, |this, window, cx| match result {
+                Ok(_) => this.load_objects(cx),
+                Err(e) => {
+                    let msg = e.to_string();
+                    window.push_notification((NotificationType::Error, msg), cx);
                 }
-            }).ok();
+            })
+            .ok();
         });
+    }
+
+    /// 这里的文件选择对话框，不能同时选择文件和文件夹。所以需要一个参数来设置是选择文件夹还是选择文件
+    fn select_files_for_upload(&mut self, folder_only: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let picked = cx.prompt_for_paths(PathPromptOptions {
+            files: !folder_only,
+            directories: folder_only,
+            multiple: true,
+            prompt: None,
+        });
+
+        cx.spawn(async move |this, cx| {
+            let paths = match picked.await {
+                Ok(Ok(Some(paths))) if !paths.is_empty() => paths,
+                _ => return,
+            };
+
+            this.update(cx, |this, cx| {
+                this.main_view.update(cx, |main_view, cx| {
+                    for p in paths {
+                        main_view.enqueue_job(JobKind::Upload { bucket_name: "".into(), object_key: "".into(), source: p, size: 0u64 }, cx);
+                    }
+                }).ok();
+
+                cx.notify();
+            }).ok();
+        }).detach();
+    }
+
+    fn on_open_files_for_upload_action(&mut self, _: &OpenFilesForUploadAction, window: &mut Window, cx: &mut Context<Self>) {
+        self.select_files_for_upload(false, window, cx);
+    }
+
+    fn on_open_folders_for_upload_action(&mut self, _: &OpenFolderForUploadAction, window: &mut Window, cx: &mut Context<Self>) {
+        self.select_files_for_upload(true, window, cx);
     }
 }
 
 impl Render for ObjectListPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
+            .on_action(cx.listener(Self::on_open_files_for_upload_action))
+            .on_action(cx.listener(Self::on_open_folders_for_upload_action))
             .size_full()
             .v_flex()
             .gap_2()
@@ -537,15 +572,23 @@ impl NewFolderPanel {
     fn on_confirmed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let name = self.input_state.read(cx).value().trim().to_string();
         if name.is_empty() || name.contains('/') || name.contains('\\') {
-            window.push_notification((NotificationType::Error, "Folder name must not be empty and must not contain / or \\"), cx);
+            window.push_notification(
+                (
+                    NotificationType::Error,
+                    "Folder name must not be empty and must not contain / or \\",
+                ),
+                cx,
+            );
             return;
         }
 
         println!("new folder name: {name}");
 
-        self.object_list_panel.update(cx, |panel, cx| {
-            panel.create_folder(name, cx);
-        }).ok();
+        self.object_list_panel
+            .update(cx, |panel, cx| {
+                panel.create_folder(name, cx);
+            })
+            .ok();
 
         window.close_dialog(cx);
     }
@@ -601,6 +644,7 @@ struct ObjectTableDelegate {
     search: String,
     current_sort: Option<(usize, ColumnSort)>,
     object_list_panel: WeakEntity<ObjectListPanel>,
+    selected_indexes: HashSet<usize>,
 }
 
 impl ObjectTableDelegate {
@@ -613,6 +657,7 @@ impl ObjectTableDelegate {
             loading: false,
             search: String::new(),
             current_sort: None,
+            selected_indexes: HashSet::new(),
             columns: vec![
                 Column::new("ck", "")
                     .width(px(60.0))
@@ -639,6 +684,7 @@ impl ObjectTableDelegate {
     }
 
     fn set_rows(&mut self, rows: Vec<OssObjectItem>) {
+        self.selected_indexes.clear();
         self.rows = rows;
         self.loading = false;
         self.recompute();
@@ -754,6 +800,22 @@ impl ObjectTableDelegate {
         self.search = needle.to_string();
         self.recompute();
     }
+
+    fn select_row(&mut self, original_row_index: usize) {
+        self.selected_indexes.insert(original_row_index);
+    }
+
+    fn unselect_row(&mut self, original_row_index: usize) {
+        self.selected_indexes.remove(&original_row_index);
+    }
+
+    fn select_all(&mut self) {
+        self.selected_indexes = self.filtered_indexes.iter().copied().collect();
+    }
+
+    fn unselect_all(&mut self) {
+        self.selected_indexes.clear();
+    }
 }
 
 impl TableDelegate for ObjectTableDelegate {
@@ -780,11 +842,33 @@ impl TableDelegate for ObjectTableDelegate {
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
         let col = &self.column(col_ix, cx);
-
-        div()
-            .size_full()
-            .text_align(col.align)
-            .child(col.name.clone())
+        if col_ix == 0 {
+            div()
+                .size_full()
+                .h_flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    Checkbox::new("select-all-checkbox")
+                        .tooltip("Toggle select")
+                        .checked(
+                            self.filtered_indexes.len() > 0
+                                && self.selected_indexes.len() == self.filtered_indexes.len(),
+                        )
+                        .on_change(cx.listener(|this, val, _, _| {
+                            if *val {
+                                this.delegate_mut().select_all();
+                            } else {
+                                this.delegate_mut().unselect_all();
+                            }
+                        })),
+                )
+        } else {
+            div()
+                .size_full()
+                .text_align(col.align)
+                .child(col.name.clone())
+        }
     }
 
     fn render_td(
@@ -792,11 +876,13 @@ impl TableDelegate for ObjectTableDelegate {
         row_ix: usize,
         col_ix: usize,
         _: &mut Window,
-        _: &mut Context<gpui_kit::component::table::TableState<Self>>,
+        cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
         let Some(row) = self.row(row_ix) else {
             return div();
         };
+
+        let original_row_index = self.filtered_indexes[row_ix];
 
         let key = row.get_key();
 
@@ -810,7 +896,17 @@ impl TableDelegate for ObjectTableDelegate {
                 .h_flex()
                 .items_center()
                 .justify_center()
-                .child(Checkbox::new(format!("ck-{}", key))),
+                .child(
+                    Checkbox::new(format!("ck-{}", key))
+                        .checked(self.selected_indexes.contains(&original_row_index))
+                        .on_change(cx.listener(move |this, val, _, _| {
+                            if *val {
+                                this.delegate_mut().select_row(original_row_index);
+                            } else {
+                                this.delegate_mut().unselect_row(original_row_index);
+                            }
+                        })),
+                ),
             1 => div()
                 .size_full()
                 .h_flex()
@@ -818,9 +914,9 @@ impl TableDelegate for ObjectTableDelegate {
                 .justify_center()
                 .child(
                     (if row.is_folder() {
-                        div().child(IconName::Folder)
+                        div().text_color(cx.theme().primary.opacity(0.85)).child(IconName::Folder)
                     } else {
-                        div().child(IconName::File)
+                        div().text_color(cx.theme().foreground.opacity(0.85)).child(IconName::File)
                     })
                     .size_4(),
                 ),

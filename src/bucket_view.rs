@@ -106,7 +106,7 @@ impl BucketTableDelegate {
         let Some((col_ix, sort)) = self.current_sort else {
             return; // 没有排序 → 自然序，完事
         };
-        let desc = matches!(sort, ColumnSort::Descending);
+        let desc = sort == ColumnSort::Descending;
         self.filtered_indexes.sort_by(|&a, &b| {
             let o = match col_ix {
                 1 => self.rows[a].name.cmp(&self.rows[b].name),
@@ -240,7 +240,7 @@ impl TableDelegate for BucketTableDelegate {
         _: &mut Window,
         _: &mut Context<TableState<Self>>,
     ) {
-        self.current_sort = (!matches!(sort, ColumnSort::Default)).then_some((col_ix, sort));
+        self.current_sort = Some((col_ix, sort));
         self.recompute();
     }
 
@@ -326,7 +326,7 @@ impl BucketListPanel {
     ///
     /// if `extend_mode` is set to `true`, new data will be appended into existing data
     fn load_buckets(&mut self, extend_mode: bool, cx: &mut Context<Self>) {
-        if matches!(self.load_state, LoadState::Loading) {
+        if self.load_state == LoadState::Loading {
             return;
         }
 
@@ -458,7 +458,7 @@ impl Render for BucketListPanel {
                     .child(
                         Button::new("load-buckets-button")
                             .label("Refresh")
-                            .loading(matches!(self.load_state, LoadState::Loading))
+                            .loading(self.load_state == LoadState::Loading)
                             .icon(IconName::RefreshCw)
                             .on_click(cx.listener(|view, _, _, cx| {
                                 view.load_buckets(false, cx);
@@ -467,7 +467,7 @@ impl Render for BucketListPanel {
                     .child(
                         Button::new("load-more-buckets-button")
                             .label("Load more")
-                            .loading(matches!(self.load_state, LoadState::Loading))
+                            .loading(self.load_state == LoadState::Loading)
                             .icon(IconName::ArrowDownToLine)
                             .disabled(!self.is_truncated)
                             .tooltip(if self.is_truncated {
@@ -517,7 +517,7 @@ impl BucketDetailPanel {
     }
 
     fn load_detail(&mut self, cx: &mut Context<Self>) {
-        if matches!(self.load_state, LoadState::Loading) {
+        if self.load_state == LoadState::Loading {
             return;
         }
 
