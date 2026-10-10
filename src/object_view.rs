@@ -9,10 +9,15 @@ use ali_oss_rs::{
     presign_common::PresignGetOptionsBuilder,
 };
 use gpui_kit::{
-    App, AppContext, Context, Div, Entity, InteractiveElement, IntoElement, ParentElement, PathPromptOptions, Render, Styled, StyledImage, Subscription, Task, TextAlign, WeakEntity, Window, assets::IconName, base::{
+    App, AppContext, Context, Div, Entity, InteractiveElement, IntoElement, ParentElement,
+    PathPromptOptions, Render, Styled, StyledImage, Subscription, Task, TextAlign, WeakEntity,
+    Window,
+    assets::IconName,
+    base::{
         Disableable, IndexPath, Placement, StyledExt,
         input::{InputEvent, InputState},
-    }, component::{
+    },
+    component::{
         ActiveTheme, Icon, Sizable, WindowExt,
         button::{Button, ButtonVariants},
         checkbox::Checkbox,
@@ -23,13 +28,20 @@ use gpui_kit::{
         progress::ProgressCircle,
         select::{Select, SelectEvent, SelectState},
         table::{Column, ColumnSort, DataTable, TableDelegate, TableState},
-    }, div, img, px,
+    },
+    div, img, px,
 };
 
 use crate::{
-    actions::{CopyAction, CutAction, DeleteAction, OpenFilesForUploadAction, OpenFolderForUploadAction, PasteAction}, common::{
+    actions::{
+        CopyAction, CutAction, DeleteAction, OpenFilesForUploadAction, OpenFolderForUploadAction,
+        PasteAction,
+    },
+    common::{
         AbortOnDrop, LoadState, format_datetime, format_file_size, oss_region_map, tokio_runtime,
-    }, job::JobKind, main_view::MainView,
+    },
+    job::JobKind,
+    main_view::MainView,
 };
 
 pub struct ObjectListPanel {
@@ -494,7 +506,12 @@ impl ObjectListPanel {
     }
 
     /// 这里的文件选择对话框，不能同时选择文件和文件夹。所以需要一个参数来设置是选择文件夹还是选择文件
-    fn select_files_for_upload(&mut self, folder_only: bool, window: &mut Window, cx: &mut Context<Self>) {
+    fn select_files_for_upload(
+        &mut self,
+        folder_only: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let picked = cx.prompt_for_paths(PathPromptOptions {
             files: !folder_only,
             directories: folder_only,
@@ -509,22 +526,49 @@ impl ObjectListPanel {
             };
 
             this.update(cx, |this, cx| {
-                this.main_view.update(cx, |main_view, cx| {
-                    for p in paths {
-                        main_view.enqueue_job(JobKind::Upload { bucket_name: "".into(), object_key: "".into(), source: p, size: 0u64 }, cx);
-                    }
-                }).ok();
+                let bucket_name = this.bucket_name.clone();
+                let prefix = this.prefix.clone();
+                this.main_view
+                    .update(cx, move |main_view, cx| {
+                        for p in paths {
+                            let Some(file_name) = p.file_name().map(|s| s.to_str().unwrap_or("")) else { continue };
+                            let object_key = format!("{}{}", prefix, file_name);
+
+                            main_view.enqueue_job(
+                                JobKind::Upload {
+                                    bucket_name: bucket_name.clone(),
+                                    object_key: object_key,
+                                    source: p,
+                                    size: 0u64,
+                                },
+                                cx,
+                            );
+                        }
+                    })
+                    .ok();
 
                 cx.notify();
-            }).ok();
-        }).detach();
+            })
+            .ok();
+        })
+        .detach();
     }
 
-    fn on_open_files_for_upload_action(&mut self, _: &OpenFilesForUploadAction, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_open_files_for_upload_action(
+        &mut self,
+        _: &OpenFilesForUploadAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.select_files_for_upload(false, window, cx);
     }
 
-    fn on_open_folders_for_upload_action(&mut self, _: &OpenFolderForUploadAction, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_open_folders_for_upload_action(
+        &mut self,
+        _: &OpenFolderForUploadAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.select_files_for_upload(true, window, cx);
     }
 }
@@ -914,9 +958,13 @@ impl TableDelegate for ObjectTableDelegate {
                 .justify_center()
                 .child(
                     (if row.is_folder() {
-                        div().text_color(cx.theme().primary.opacity(0.85)).child(IconName::Folder)
+                        div()
+                            .text_color(cx.theme().primary.opacity(0.85))
+                            .child(IconName::Folder)
                     } else {
-                        div().text_color(cx.theme().foreground.opacity(0.85)).child(IconName::File)
+                        div()
+                            .text_color(cx.theme().foreground.opacity(0.85))
+                            .child(IconName::File)
                     })
                     .size_4(),
                 ),

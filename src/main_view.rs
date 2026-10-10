@@ -75,9 +75,9 @@ impl MainView {
         let job_panel = cx.new(|cx| JobPanel::new(job_queue.clone(), window, cx));
 
         let job_sub = cx.observe(&job_queue, |this, entity, cx| {
-            println!("job queue changed");
             let next = entity.read(cx).summary();
             if next != this.jobs_summary {
+                println!("job queue changed");
                 this.jobs_summary = next;
                 cx.notify();
             }

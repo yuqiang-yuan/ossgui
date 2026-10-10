@@ -17,16 +17,17 @@ use std::{
 use ali_oss_rs::Client;
 use gpui_kit::{
     App, AppContext, Context, Entity, InteractiveElement, IntoElement, ParentElement, Render,
-    RenderOnce, Styled, Subscription, Task, Window,
+    Styled, Subscription, Task, Window,
     assets::IconName,
-    base::{IndexPath, Selectable, StyledExt, h_flex},
+    base::{IndexPath, h_flex},
     component::{
         ActiveTheme, Icon, Sizable,
         button::{Button, ButtonVariants},
-        list::{List, ListDelegate, ListState},
+        list::{List, ListDelegate, ListItem, ListState},
         progress::ProgressCircle,
     },
     div,
+    prelude::FluentBuilder,
 };
 use tokio::sync::{mpsc, watch};
 
@@ -218,7 +219,7 @@ impl JobQueue {
         });
 
         Self {
-            jobs: gen_test_data(),
+            jobs: vec![],
             queue_order: VecDeque::new(),
             running: HashMap::new(),
             in_flight: 0,
@@ -264,6 +265,10 @@ impl JobQueue {
         if let Some(job) = self.job_mut(id) {
             job.state = state;
         }
+    }
+
+    fn cancel_job(&mut self, id: u64) {
+        let _ = self.tx.send(JobEvent::Cancelled { id });
     }
 
     pub fn enqueue(&mut self, kind: JobKind, client: Arc<Client>, cx: &mut Context<Self>) -> u64 {
@@ -346,16 +351,19 @@ impl JobQueue {
                     *slot = progress;
                 }
             }
+
             JobEvent::Completed { id } => {
                 self.set_state(id, JobState::Completed);
                 self.release_slot(id);
                 self.pump(cx);
             }
+
             JobEvent::Failed { id, message } => {
                 self.set_state(id, JobState::Failed { message });
                 self.release_slot(id);
                 self.pump(cx);
             }
+
             JobEvent::Cancelled { id } => {
                 self.set_state(id, JobState::Cancelled);
                 self.release_slot(id);
@@ -419,6 +427,8 @@ fn select_dispatch(order: &VecDeque<u64>, in_flight: usize, max: usize) -> Vec<u
 }
 
 mod runner {
+    use ali_oss_rs::{object::ObjectOperations, object_common::PutObjectOptionsBuilder};
+
     use crate::common::tokio_runtime;
 
     use super::*;
@@ -489,12 +499,19 @@ mod runner {
             Checkpoint::Cancel => return Err(JobError::Cancelled),
         }
 
-        tokio::select! {
-            _ = fake_upload() => {},
+        let client = run.client.clone();
+        let tx_clone = tx.clone();
+        let job_id = run.id;
+        let result = tokio::select! {
+            r = client.put_object_from_file(bucket_name, object_key, source, Some(PutObjectOptionsBuilder::new().progress(move |done, total| {
+                println!("send: {done}, total: {total:?}");
+                let _ = tx_clone.send(JobEvent::Progress {id: job_id, progress: JobProgress { done, total }});
+            }).build())) => { r.map_err(|e| JobError::Failed(format!("{e}"))) },
+
             _ = ctl.wait_for(|s| *s == JobSignal::Cancel) => {
                 return Err(JobError::Cancelled)
             },
-        }
+        };
 
         println!("file {object_key} uploaded successfully");
 
@@ -564,40 +581,26 @@ fn random_ms(min: u64, max: u64) -> u64 {
     min + (mixed >> 33) % (max - min).max(1)
 }
 
-#[derive(IntoElement)]
-struct JobRow {
-    id: u64,
+struct JobListDelegate {
     queue: Entity<JobQueue>,
-    selected: bool,
+    selected_index: Option<IndexPath>,
 }
 
-impl JobRow {
-    fn new(id: u64, queue: Entity<JobQueue>) -> Self {
-        Self {
-            id,
-            queue,
-            selected: false,
-        }
-    }
-}
+impl ListDelegate for JobListDelegate {
+    type Item = ListItem;
 
-impl Selectable for JobRow {
-    fn selected(mut self, selected: bool) -> Self {
-        self.selected = selected;
-        self
+    fn items_count(&self, _: usize, cx: &App) -> usize {
+        self.queue.read(cx).jobs().len()
     }
 
-    fn is_selected(&self) -> bool {
-        self.selected
-    }
-}
-
-impl RenderOnce for JobRow {
-    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
-        let queue = self.queue.read(cx);
-        let Some(job) = queue.job(self.id) else {
-            return div().into_any_element();
-        };
+    fn render_item(
+        &mut self,
+        ix: IndexPath,
+        _: &mut Window,
+        cx: &mut Context<ListState<Self>>,
+    ) -> Option<Self::Item> {
+        let q = self.queue.read(cx);
+        let job = q.jobs().get(ix.row)?;
 
         let label = job.kind.get_label().to_string();
 
@@ -616,7 +619,7 @@ impl RenderOnce for JobRow {
                     .text_color(cx.theme().colors.red)
                     .into_any_element(),
             },
-            JobState::Running { progress } => ProgressCircle::new(format!("loading-{}", self.id))
+            JobState::Running { progress } => ProgressCircle::new(format!("loading-{}", job.id))
                 .loading(progress.total.is_none())
                 .value(progress.percent())
                 .size_4()
@@ -628,73 +631,55 @@ impl RenderOnce for JobRow {
                 .text_color(cx.theme().colors.danger)
                 .into_any_element(),
             JobState::Cancelled => Icon::new(IconName::CircleSlash2)
-                .text_color(cx.theme().secondary_foreground)
+                .text_color(cx.theme().secondary_foreground.opacity(0.7))
                 .into_any_element(),
         };
 
-        let row_ui_id = format!("job-row-{}", self.id);
-
-        div()
-            .id(row_ui_id.clone())
-            .group(row_ui_id.clone())
-            .min_w_0()
-            .w_full()
-            .p_2()
-            .rounded_md()
-            .hover(|s| s.bg(cx.theme().list_hover))
-            .h_flex()
-            .items_center()
-            .gap_1()
-            .child(div().flex_shrink_0().child(icon))
-            .child(
-                div()
-                    .min_w_0()
-                    .flex_grow_1()
-                    .text_sm()
-                    .truncate()
-                    .child(label),
-            )
-            .child(
-                div()
-                    .size_6()
-                    .flex_shrink_0()
-                    .invisible()
-                    .group_hover(row_ui_id.clone(), |s| s.visible())
-                    .child(
-                        Button::new(format!("cancel-button-{}", self.id))
-                            .small()
-                            .icon(IconName::X)
-                            .ghost()
-                            .danger()
-                            .rounded_full()
-                            .tooltip("Cancel"),
-                    ),
-            )
-            .into_any_element()
-    }
-}
-
-struct JobListDelegate {
-    queue: Entity<JobQueue>,
-    selected_index: Option<IndexPath>,
-}
-
-impl ListDelegate for JobListDelegate {
-    type Item = JobRow;
-
-    fn items_count(&self, _: usize, cx: &App) -> usize {
-        self.queue.read(cx).jobs().len()
-    }
-
-    fn render_item(
-        &mut self,
-        ix: IndexPath,
-        _: &mut Window,
-        cx: &mut Context<ListState<Self>>,
-    ) -> Option<Self::Item> {
-        let q = self.queue.read(cx);
-        let job = q.jobs().get(ix.row)?;
-        Some(JobRow::new(job.id, self.queue.clone()))
+        let row_ui_id = format!("job-row-{}", job.id);
+        let job_id = job.id;
+        Some(
+            ListItem::new(row_ui_id.clone())
+                .group(row_ui_id.clone())
+                .rounded_md()
+                .p_2()
+                .child(
+                    h_flex()
+                        .items_center()
+                        .gap_2()
+                        .child(div().size_4().flex_shrink_0().child(icon))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex_grow_1()
+                                .text_sm()
+                                .truncate()
+                                .child(label),
+                        )
+                        .child(
+                            div()
+                                .size_6()
+                                .flex_shrink_0()
+                                .invisible()
+                                .group_hover(row_ui_id.clone(), |s| s.visible())
+                                .when(job.can_cancel(), |d| {
+                                    d.child(
+                                        Button::new(format!("cancel-button-{}", job.id))
+                                            .small()
+                                            .icon(IconName::X)
+                                            .ghost()
+                                            .danger()
+                                            .rounded_full()
+                                            .tooltip("Cancel")
+                                            .on_click(cx.listener(move |state, _, _, cx| {
+                                                state.delegate_mut().queue.update(cx, |q, _| {
+                                                    q.cancel_job(job_id);
+                                                });
+                                            })),
+                                    )
+                                }),
+                        ),
+                ),
+        )
     }
 
     fn set_selected_index(
@@ -724,7 +709,7 @@ impl JobPanel {
             queue: queue.clone(),
             selected_index: None,
         };
-        let list_state = cx.new(|cx| ListState::new(delegate, window, cx));
+        let list_state = cx.new(|cx| ListState::new(delegate, window, cx).selectable(false));
 
         Self {
             queue,
@@ -733,13 +718,13 @@ impl JobPanel {
         }
     }
 
-    /// 让 List 重新测量布局。
-    /// VirtualList 首次布局时还不知道可用宽度（last_content_size 为空），
-    /// 会用一个不受约束的宽度量样例行，导致 content_size.width 偏大。
-    /// 补一次布局就能拿到正确宽度。
-    pub fn refresh_list(&mut self, cx: &mut Context<Self>) {
-        self.list_state.update(cx, |_, cx| cx.notify());
-    }
+    // 让 List 重新测量布局。
+    // VirtualList 首次布局时还不知道可用宽度（last_content_size 为空），
+    // 会用一个不受约束的宽度量样例行，导致 content_size.width 偏大。
+    // 补一次布局就能拿到正确宽度。
+    // pub fn refresh_list(&mut self, cx: &mut Context<Self>) {
+    //     self.list_state.update(cx, |_, cx| cx.notify());
+    // }
 }
 
 impl Render for JobPanel {
@@ -889,7 +874,10 @@ fn gen_test_data() -> Vec<Job> {
             },
             client: Arc::new(Client::from_env()),
             state: JobState::Running {
-                progress: JobProgress { done: 1234, total: Some(2234) },
+                progress: JobProgress {
+                    done: 1234,
+                    total: Some(2234),
+                },
             },
         },
         Job {

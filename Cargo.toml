@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-ali-oss-rs = "^0.3.0"
+ali-oss-rs = { git = "https://github.com/yuqiang-yuan/ali-oss-rs.git", branch = "with-progress" }
 anyhow = "1.0.104"
 chrono = "0.4.45"
 dirs = "7.0.0"
