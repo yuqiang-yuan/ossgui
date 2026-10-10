@@ -308,13 +308,16 @@ impl Render for MainView {
                     .when(self.show_fps, |this| this.child(fps_monitor(window, cx))),
             )
             .child(
-                StatusBar::new().left(
+                // 任务面板从右侧推出，所以开关和速率也放状态栏右侧：
+                // 按钮就在面板右下角的正下方，而且跟面板右边缘对齐成一条竖线。
+                // 摘要按钮贴最右（它就是面板的开关），速率在它左边。
+                StatusBar::new().right(
                     div()
                         .h_flex()
                         .items_center()
                         .gap_3()
-                        .child(self.jobs_summary_button(cx))
-                        .child(self.speed_indicator(cx)),
+                        .child(self.speed_indicator(cx))
+                        .child(self.jobs_summary_button(cx)),
                 ),
             )
     }
