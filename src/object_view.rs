@@ -544,7 +544,19 @@ impl ObjectListPanel {
                     .prefix(Icon::new(IconName::Search).small()),
             )
             .child(div().flex_grow_1())
-            .child(
+            .child(if cx.can_select_mixed_files_and_dirs() {
+                // 能混选的平台（macOS）：一个对话框里文件和文件夹都能选，
+                // 没必要再拆"Files / Folders"两项
+                Button::new("upload-button")
+                    .icon(IconName::CloudUpload)
+                    .label("Upload")
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.select_files_for_upload(false, window, cx);
+                    }))
+                    .into_any_element()
+            } else {
+                // 只能二选一的平台（Windows / Linux）：下拉里让用户先说明要传什么，
+                // 否则传文件夹会被当成传单个文件
                 Button::new("upload-button")
                     .icon(IconName::CloudUpload)
                     .label("Upload")
@@ -552,8 +564,9 @@ impl ObjectListPanel {
                     .dropdown_menu(|menu, _, _| {
                         menu.menu("Files", Box::new(OpenFilesForUploadAction))
                             .menu("Folders", Box::new(OpenFolderForUploadAction))
-                    }),
-            )
+                    })
+                    .into_any_element()
+            })
             .child(
                 Button::new("download-button")
                     .icon(IconName::CloudDownload)
@@ -691,21 +704,24 @@ impl ObjectListPanel {
 
     /// 打开上传用的文件/文件夹选择器。
     ///
-    /// Linux 的 xdg-portal 实现会**忽略 `files`**：`directories: true` 就是文件夹
-    /// 选择器，两者只能二选一，所以 `folder_only` 只在 Linux 上有意义。
-    /// 其他平台两个都可以为 true，用户在一个对话框里既能选文件也能选目录。
+    /// "能不能在一个对话框里既选文件又选目录"是**运行时**才知道的平台能力
+    /// （`App::can_select_mixed_files_and_dirs`），别用 `#[cfg]` 猜：
+    /// - macOS  : NSOpenPanel 的 canChooseFiles / canChooseDirectories 可以同时为真
+    /// - Windows: FOS_PICKFOLDERS 是个模式开关，directories = true 就是纯文件夹
+    ///            选择器，files = true 会被无声吞掉
+    /// - Linux  : portal 的 OpenFileRequest 只看 directory 标志，files 被忽略
     fn select_files_for_upload(
         &mut self,
         folder_only: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        #[cfg(target_os = "linux")]
-        let (files, directories) = (!folder_only, folder_only);
-        #[cfg(not(target_os = "linux"))]
-        let (files, directories) = {
-            let _ = folder_only;
+        let (files, directories) = if folder_only {
+            (false, true)
+        } else if cx.can_select_mixed_files_and_dirs() {
             (true, true)
+        } else {
+            (true, false)
         };
 
         let picked = cx.prompt_for_paths(PathPromptOptions {
