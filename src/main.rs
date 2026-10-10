@@ -71,9 +71,27 @@ fn main() {
         cx.set_global(settings);
 
         cx.on_app_quit(|cx| {
-            let snapshot = cx.global::<AppSettings>();
+            // 注意顺序：gpui 的 shutdown 是「先同步跑观察者的函数体 → 再清空窗口
+            // → 才置 quitting」，返回的 future 是之后才 await 的。
+            // 所以窗口信息必须在这里读完，挪进 async 块就拿不到了。
+            if let Some(handle) = cx.windows().first().copied()
+                && let Ok((size, maximized)) = cx.update_window(handle, |_, window, _| {
+                    (window.bounds().size, window.is_maximized())
+                })
+            {
+                let settings = cx.global_mut::<AppSettings>();
+                settings.window_maximized = Some(maximized);
+
+                // 最大化时 bounds 就是屏幕大小，存进去会把「还原后的尺寸」冲掉，
+                // 所以只在非最大化时记宽高
+                if !maximized {
+                    settings.window_width = Some(size.width.as_f32());
+                    settings.window_height = Some(size.height.as_f32());
+                }
+            }
+
             println!("saving settings before quit");
-            snapshot.save();
+            cx.global::<AppSettings>().save();
             async {}
         })
         .detach();

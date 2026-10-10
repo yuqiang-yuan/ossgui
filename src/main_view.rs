@@ -9,7 +9,8 @@ use gpui_kit::{
     base::{Placement, StyledExt, resizable_panel},
     component::{
         ActiveTheme, Sizable, Theme, ThemeMode, TitleBar,
-        button::{Button, ButtonVariants},
+        WindowExt,
+        button::{Button, ButtonVariant, ButtonVariants},
         h_resizable,
         menu::{AppMenuBar, DropdownMenu, PopupMenuItem},
         status_bar::StatusBar,
@@ -79,6 +80,28 @@ impl MainView {
 
         // 队列每次 notify 都会走到这里（包括每秒一次的速率重算），
         // 只有"状态栏上会显示的东西"变了才真的重绘
+        // 窗口管理器要求关闭（Alt+F4 / 任务栏）时也能拦下来问一句。
+        // 注意这条只覆盖 WM 的关闭请求，标题栏的 X 按钮走的是 remove_window，
+        // 要单独用 TitleBar::on_close_window 接管。
+        window.on_window_should_close(cx, {
+            let this_weak = cx.weak_entity();
+            move |window, cx| {
+                let busy = this_weak
+                    .update(cx, |main_view, cx| main_view.has_pending_jobs(cx))
+                    .unwrap_or(false);
+
+                if !busy {
+                    return true; // 没任务，放行
+                }
+
+                // 有任务：拦下这次关闭，弹确认框（确认后走 cx.quit()）
+                this_weak
+                    .update(cx, |main_view, cx| main_view.request_quit(window, cx))
+                    .ok();
+                false
+            }
+        });
+
         let job_sub = cx.observe(&job_queue, |this, entity, cx| {
             let (summary, speed) = {
                 let queue = entity.read(cx);
@@ -145,6 +168,10 @@ impl MainView {
         cx.notify();
     }
 
+    fn on_quit_action(&mut self, _: &QuitAction, window: &mut Window, cx: &mut Context<Self>) {
+        self.request_quit(window, cx);
+    }
+
     fn jobs_summary_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let s = &self.jobs_summary;
         let (label, color) = match () {
@@ -180,6 +207,47 @@ impl MainView {
 
                 cx.notify();
             }))
+    }
+
+    /// 有任务在排队或运行中吗？（退出确认用）
+    fn has_pending_jobs(&self, cx: &App) -> bool {
+        let s = self.job_queue.read(cx).summary();
+        s.queued + s.running > 0
+    }
+
+    /// 退出前的统一入口：有任务在跑就先问一句。
+    ///
+    /// 三个入口都走这里：
+    /// - 菜单 File → Quit（QuitAction）
+    /// - 标题栏的 X（TitleBar::on_close_window —— 它默认直接 remove_window，
+    ///   **不经过** on_window_should_close，所以必须单独拦）
+    /// - 窗口管理器要求关闭（Alt+F4 / 任务栏，走 on_window_should_close）
+    fn request_quit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.has_pending_jobs(cx) {
+            cx.quit();
+            return;
+        }
+
+        let s = self.job_queue.read(cx).summary();
+        let title = match (s.running, s.queued) {
+            (0, q) => format!("{q} transfers are still queued"),
+            (r, 0) => format!("{r} transfers are still running"),
+            (r, q) => format!("{} transfers are still running or queued", r + q),
+        };
+
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            alert
+                .confirm()
+                .title(title.clone())
+                .description("Quitting now stops them mid-transfer.")
+                .ok_text("Quit anyway")
+                .ok_variant(ButtonVariant::Danger)
+                .cancel_text("Cancel")
+                .on_ok(|_, _, cx| {
+                    cx.quit();
+                    true
+                })
+        });
     }
 
     /// 整体传输速率。只在真有数据在传时才出现，空闲时这段不渲染。
@@ -233,8 +301,20 @@ impl Render for MainView {
             .track_focus(&self.focus_handle)
             .size_full()
             .v_flex()
+            .on_action(cx.listener(Self::on_quit_action))
             .child(
-                TitleBar::new().child(
+                TitleBar::new()
+                    // X 按钮默认是 window.remove_window()，绕过了 on_window_should_close，
+                    // 所以这里单独接管（Linux 专用，其他平台这个设置会被忽略）
+                    .on_close_window({
+                        let main_view = cx.weak_entity();
+                        move |_, window, cx| {
+                            main_view
+                                .update(cx, |main_view, cx| main_view.request_quit(window, cx))
+                                .ok();
+                        }
+                    })
+                    .child(
                     div()
                         .size_full()
                         .h_flex()
