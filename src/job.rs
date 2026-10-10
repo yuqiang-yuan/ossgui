@@ -16,18 +16,21 @@ use std::{
 
 use ali_oss_rs::Client;
 use gpui_kit::{
-    App, AppContext, Context, Entity, EventEmitter, InteractiveElement, IntoElement, ParentElement, Render,
-    ScrollStrategy, Styled, Subscription, Task, Window,
+    Anchor, App, AppContext, Context, Entity, EventEmitter, FontWeight, InteractiveElement,
+    IntoElement, ParentElement, Render, ScrollStrategy, StatefulInteractiveElement, Styled,
+    Subscription, Task, Window,
     assets::IconName,
-    base::{IndexPath, h_flex},
+    base::{IndexPath, h_flex, v_flex},
     component::{
         ActiveTheme, Icon, Sizable,
         button::{Button, ButtonVariants},
+        hover_card::HoverCard,
         list::{List, ListDelegate, ListItem, ListState},
         progress::ProgressCircle,
     },
     div,
     prelude::FluentBuilder,
+    px,
 };
 use tokio::sync::{mpsc, watch};
 
@@ -177,6 +180,16 @@ impl JobKind {
 
             // 下载不改远端
             JobKind::Download { .. } => false,
+        }
+    }
+
+    /// 失败卡片上的标题：这个任务本来要干什么
+    fn failure_title(&self) -> &'static str {
+        match self {
+            JobKind::Upload { .. } => "Upload failed",
+            JobKind::Download { .. } => "Download failed",
+            JobKind::Delete { .. } => "Delete failed",
+            JobKind::DeletePrefix { .. } => "Folder delete failed",
         }
     }
 
@@ -747,6 +760,11 @@ mod runner {
             unreachable!()
         };
 
+        // 空文件不发请求，直接判失败 —— 传上去也没有意义
+        if *size == 0 {
+            return Err(JobError::Failed("Empty files can't be uploaded.".into()));
+        }
+
         // 两条路的进度单位不一样（小文件是字节，分片是片数），
         // 所以各自的"起始进度"由各自上报
         if *size >= MULTIPART_THRESHOLD {
@@ -1182,6 +1200,11 @@ impl ListDelegate for JobListDelegate {
 
         let row_ui_id = format!("job-row-{}", job.id);
         let job_id = job.id;
+        let error_title = job.kind.failure_title();
+        let error = match &job.state {
+            JobState::Failed { message } => Some(message.clone()),
+            _ => None,
+        };
         Some(
             ListItem::new(row_ui_id.clone())
                 .group(row_ui_id.clone())
@@ -1204,8 +1227,56 @@ impl ListDelegate for JobListDelegate {
                             div()
                                 .size_6()
                                 .flex_shrink_0()
-                                .invisible()
-                                .group_hover(row_ui_id.clone(), |s| s.visible())
+                                // 失败的任务：行尾常驻一个警告图标，hover 弹出卡片显示完整错误。
+                                //
+                                // 用 HoverCard 而不是 Button 的 .tooltip()：tooltip 的内容是
+                                // 一行不换行的 h_flex，reqwest 的错误里往往带着整条带签名的
+                                // URL，挤成一行没法看。HoverCard 是个 Popover —— 走 deferred
+                                // 层绘制（不会被 List 的裁剪切掉），内容能自己定宽折行。
+                                .when_some(error, |d, message| {
+                                    d.child(
+                                        HoverCard::new(("job-error", job_id))
+                                            // 图标贴着面板右边缘，卡片往左下方展开才不会顶出窗口
+                                            .anchor(Anchor::TopRight)
+                                            .trigger(
+                                                Button::new(("job-error-icon", job_id))
+                                                    .small()
+                                                    .ghost()
+                                                    .icon(IconName::CircleAlert)
+                                                    .text_color(cx.theme().colors.danger),
+                                            )
+                                            .content(move |_, _, cx| {
+                                                v_flex()
+                                                    .gap_1()
+                                                    .max_w(px(360.))
+                                                    .child(
+                                                        div()
+                                                            .text_sm()
+                                                            .font_weight(FontWeight::SEMIBOLD)
+                                                            .child(error_title),
+                                                    )
+                                                    .child(
+                                                        // 错误消息原样显示；只有长得离谱时
+                                                        // 才在卡片内滚动，标题留在上面不动
+                                                        div()
+                                                            .id("job-error-message")
+                                                            .text_sm()
+                                                            .text_color(
+                                                                cx.theme().muted_foreground,
+                                                            )
+                                                            .max_h(px(240.))
+                                                            .overflow_y_scroll()
+                                                            .child(message.clone()),
+                                                    )
+                                            }),
+                                    )
+                                })
+                                // 取消按钮是 hover 才出现的；错误图标要一直看得见，
+                                // 所以只在"可取消"的行上套 invisible + group_hover
+                                .when(job.can_cancel(), |d| {
+                                    d.invisible()
+                                        .group_hover(row_ui_id.clone(), |s| s.visible())
+                                })
                                 .when(job.can_cancel(), |d| {
                                     d.child(
                                         Button::new(format!("cancel-button-{}", job.id))

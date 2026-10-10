@@ -463,7 +463,7 @@ impl ObjectListPanel {
                     .icon(IconName::RefreshCw)
                     .rounded_none()
                     .border_0().on_click(cx.listener(|this, _, _, cx| {
-                        this.refresh_objects(cx);
+                        this.load_objects(cx);
                     })),
             )
             .child(

@@ -133,8 +133,9 @@ dependencies = [
 
 [[package]]
 name = "ali-oss-rs"
-version = "0.3.0"
-source = "git+https://github.com/yuqiang-yuan/ali-oss-rs.git?branch=with-progress#876409ff738ff067d543ce4fa0023e0f115852f7"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32b8d58cc758bd88f2b8a5a603f4b1f6a0c1b7e6c9c0961e1a8b4c475e20758f"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
