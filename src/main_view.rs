@@ -22,7 +22,8 @@ use gpui_kit::{
 use crate::{
     actions::{AboutAction, QuitAction},
     bucket_view::BucketListPanel,
-    job::{JobKind, JobPanel, JobQueue, JobsSummary},
+    common::format_file_size,
+    job::{JobKind, JobPanel, JobQueue, JobsSummary, TransferSpeed},
     object_view::ObjectListPanel,
     settings::AppSettings,
 };
@@ -46,6 +47,8 @@ pub struct MainView {
     job_queue: Entity<JobQueue>,
     job_panel: Entity<JobPanel>,
     jobs_summary: JobsSummary,
+    /// 整体传输速率（字节/秒），由 JobQueue 每秒重算
+    transfer_speed: TransferSpeed,
     _subs: Vec<Subscription>,
     jobs_open: bool,
 }
@@ -74,11 +77,17 @@ impl MainView {
         let job_queue = cx.new(|cx| JobQueue::new(cx));
         let job_panel = cx.new(|cx| JobPanel::new(job_queue.clone(), window, cx));
 
+        // 队列每次 notify 都会走到这里（包括每秒一次的速率重算），
+        // 只有"状态栏上会显示的东西"变了才真的重绘
         let job_sub = cx.observe(&job_queue, |this, entity, cx| {
-            let next = entity.read(cx).summary();
-            if next != this.jobs_summary {
-                println!("job queue changed");
-                this.jobs_summary = next;
+            let (summary, speed) = {
+                let queue = entity.read(cx);
+                (queue.summary(), queue.speed())
+            };
+
+            if summary != this.jobs_summary || speed != this.transfer_speed {
+                this.jobs_summary = summary;
+                this.transfer_speed = speed;
                 cx.notify();
             }
         });
@@ -96,6 +105,7 @@ impl MainView {
             job_panel,
             ossclient,
             jobs_summary: JobsSummary::default(),
+            transfer_speed: TransferSpeed::default(),
             jobs_open: false,
             _subs: vec![job_sub],
         }
@@ -170,6 +180,24 @@ impl MainView {
             }))
     }
 
+    /// 整体传输速率。只在真有数据在传时才出现，空闲时这段不渲染。
+    fn speed_indicator(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let speed = self.transfer_speed;
+
+        div()
+            .h_flex()
+            .items_center()
+            .gap_3()
+            .text_sm()
+            .text_color(cx.theme().muted_foreground)
+            .when(speed.up > 0, |this| {
+                this.child(format!("↑ {}/s", format_file_size(speed.up)))
+            })
+            .when(speed.down > 0, |this| {
+                this.child(format!("↓ {}/s", format_file_size(speed.down)))
+            })
+    }
+
     pub fn enqueue_job(&mut self, kind: JobKind, cx: &mut Context<Self>) {
         let client = self.ossclient.clone();
         self.job_queue.update(cx, |state, cx| {
@@ -241,7 +269,7 @@ impl Render for MainView {
                             )
                             .child(
                                 resizable_panel()
-                                    .size(px(300.0))
+                                    .size(px(400.0))
                                     // .size_range(px(300.0)..px(400.0))
                                     .visible(self.jobs_open)
                                     .child(
@@ -268,7 +296,16 @@ impl Render for MainView {
                     )
                     .when(self.show_fps, |this| this.child(fps_monitor(window, cx))),
             )
-            .child(StatusBar::new().left(self.jobs_summary_button(cx)))
+            .child(
+                StatusBar::new().left(
+                    div()
+                        .h_flex()
+                        .items_center()
+                        .gap_3()
+                        .child(self.jobs_summary_button(cx))
+                        .child(self.speed_indicator(cx)),
+                ),
+            )
     }
 }
 

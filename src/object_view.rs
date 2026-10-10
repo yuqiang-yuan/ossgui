@@ -68,9 +68,10 @@ const MAX_UPLOAD_FILES: usize = 5000;
 /// 扫描结果：一个待上传的文件
 struct UploadCandidate {
     source: PathBuf,
-    /// 相对选中根的路径，用来拼 object key。
-    /// 选中目录本身的名字会保留：`/home/me/pics/vacation/day1/a.jpg` → `vacation/day1/a.jpg`
-    relative: PathBuf,
+    /// 相对选中根的路径（已把 `\` 换成 `/`）。既用来拼 object key，
+    /// 也用来在面板上显示。选中目录本身的名字会保留：
+    /// `/home/me/pics/vacation/day1/a.jpg` → `vacation/day1/a.jpg`
+    relative: String,
     size: u64,
 }
 
@@ -99,7 +100,10 @@ fn scan_upload_paths(paths: Vec<PathBuf>) -> (Vec<UploadCandidate>, bool) {
 
         if !meta.is_dir() {
             out.push(UploadCandidate {
-                relative: PathBuf::from(path.file_name().unwrap_or_default()),
+                relative: path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().replace('\\', "/"))
+                    .unwrap_or_default(),
                 source: path,
                 size: meta.len(),
             });
@@ -129,8 +133,13 @@ fn scan_upload_paths(paths: Vec<PathBuf>) -> (Vec<UploadCandidate>, bool) {
                     let Ok(rel) = child.strip_prefix(&path) else {
                         continue;
                     };
-                    // 先把借用用掉，下面才能把 child 移进 UploadCandidate
-                    let relative = root_name.join(rel);
+                    // 先把借用用掉，下面才能把 child 移进 UploadCandidate。
+                    // Windows 上 PathBuf 的分隔符是 '\'，这里统一成 OSS 的 '/'，
+                    // 同时这个字符串也要拿去显示
+                    let relative = root_name
+                        .join(rel)
+                        .to_string_lossy()
+                        .replace('\\', "/");
 
                     out.push(UploadCandidate {
                         source: child,
@@ -300,8 +309,8 @@ impl ObjectListPanel {
 
                             this.is_truncated = is_truncated;
                             this.next_continuation_token = next_continuation_token;
-                            common_prefixes.iter().for_each(|c| println!("prefix: {prefix}, common prefix: {c}"));
-                            contents.iter().for_each(|f| println!("prefix: {prefix}, object: {}", f.key));
+                            // common_prefixes.iter().for_each(|c| println!("prefix: {prefix}, common prefix: {c}"));
+                            // contents.iter().for_each(|f| println!("prefix: {prefix}, object: {}", f.key));
 
                             let mut rows = common_prefixes
                                 .into_iter()
@@ -668,13 +677,10 @@ impl ObjectListPanel {
                 .into_iter()
                 .map(|candidate| JobKind::Upload {
                     bucket_name: bucket_name.clone(),
-                    // Windows 上是 '\'，而 OSS 的 key 只认 '/'
-                    object_key: format!(
-                        "{prefix}{}",
-                        candidate.relative.to_string_lossy().replace('\\', "/")
-                    ),
+                    object_key: format!("{prefix}{}", candidate.relative),
                     source: candidate.source,
                     size: candidate.size,
+                    relative: candidate.relative,
                 })
                 .collect();
 
@@ -1230,7 +1236,7 @@ impl ObjectMetaPanel {
             this.update_in(cx, |this, window, cx| {
                 match result {
                     Ok(meta) => {
-                        println!("{:?}", meta);
+                        // println!("{:?}", meta);
                         this.presigned_url = Some(
                             client_clone.presign_url(
                                 bucket_name_clone,
