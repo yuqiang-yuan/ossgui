@@ -428,41 +428,43 @@ impl ObjectListPanel {
             .w_full()
             .border_b_1()
             .border_color(cx.theme().border)
-            .child({
-                let main_view = self.main_view.clone();
-                Button::new("home-button")
-                    .tooltip("Goto bucket list")
-                    .icon(IconName::House)
-                    .rounded_none()
-                    .border_0()
-                    .on_click(move |_, window, cx| {
-                        main_view
-                            .update(cx, |view, cx| {
-                                view.goto_bucket_list(window, cx);
-                            })
-                            .ok();
-                    })
-            })
-            .child(
-                Button::new("back-button")
-                    .tooltip("Backward")
-                    .icon(IconName::ArrowLeft)
-                    .rounded_none()
-                    .border_0(),
-            )
-            .child(
-                Button::new("forward-button")
-                    .tooltip("Forward")
-                    .icon(IconName::ArrowRight)
-                    .rounded_none()
-                    .border_0(),
-            )
+            // .child({
+            //     let main_view = self.main_view.clone();
+            //     Button::new("home-button")
+            //         .tooltip("Goto bucket list")
+            //         .icon(IconName::House)
+            //         .rounded_none()
+            //         .border_0()
+            //         .on_click(move |_, window, cx| {
+            //             main_view
+            //                 .update(cx, |view, cx| {
+            //                     view.goto_bucket_list(window, cx);
+            //                 })
+            //                 .ok();
+            //         })
+            // })
+            // .child(
+            //     Button::new("back-button")
+            //         .tooltip("Backward")
+            //         .icon(IconName::ArrowLeft)
+            //         .rounded_none()
+            //         .border_0(),
+            // )
+            // .child(
+            //     Button::new("forward-button")
+            //         .tooltip("Forward")
+            //         .icon(IconName::ArrowRight)
+            //         .rounded_none()
+            //         .border_0(),
+            // )
             .child(
                 Button::new("refresh-button")
                     .tooltip("Refresh")
                     .icon(IconName::RefreshCw)
                     .rounded_none()
-                    .border_0(),
+                    .border_0().on_click(cx.listener(|this, _, _, cx| {
+                        this.refresh_objects(cx);
+                    })),
             )
             .child(
                 div()
@@ -765,9 +767,14 @@ impl ObjectListPanel {
                 })
                 .collect();
 
-            main_view
-                .update(cx, move |main_view, cx| main_view.enqueue_jobs(kinds, cx))
-                .ok();
+            cx.update(|window, cx| {
+                main_view
+                    .update(cx, move |main_view, cx| {
+                        main_view.enqueue_jobs(kinds, window, cx)
+                    })
+                    .ok();
+            })
+            .ok();
 
             cx.update(|window, cx| {
                 let msg = if truncated {
@@ -840,7 +847,7 @@ impl ObjectListPanel {
                 .description(description)
                 .ok_text("Delete")
                 .ok_variant(ButtonVariant::Danger)
-                .on_ok(move |_, _, cx| {
+                .on_ok(move |_, window, cx| {
                     // 一个对象一个任务：每个文件、每个文件夹在面板上各占一行，
                     // 各自有独立的进度和取消。
                     // （代价是每个对象一次 HTTP 请求，批量删除那套 1000 个一批的
@@ -861,7 +868,9 @@ impl ObjectListPanel {
                     }
 
                     main_view
-                        .update(cx, move |main_view, cx| main_view.enqueue_jobs(kinds, cx))
+                        .update(cx, move |main_view, cx| {
+                            main_view.enqueue_jobs(kinds, window, cx)
+                        })
                         .ok();
 
                     // 已经交给队列了，清掉勾选

@@ -201,11 +201,27 @@ impl MainView {
     }
 
     /// 批量入队（上传一个文件夹时可能有几千个文件）
-    pub fn enqueue_jobs(&mut self, kinds: Vec<JobKind>, cx: &mut Context<Self>) {
+    pub fn enqueue_jobs(
+        &mut self,
+        kinds: Vec<JobKind>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if kinds.is_empty() {
+            return;
+        }
+
         let client = self.ossclient.clone();
         self.job_queue.update(cx, |state, cx| {
             state.enqueue_many(kinds.into_iter().map(|kind| (kind, client.clone())), cx);
         });
+
+        // 有任务进来就弹出面板并滚到最新一条：
+        // 不弹的话用户点了上传看不到任何变化，弹了不滚的话看到的是列表顶部的一堆历史任务
+        self.jobs_open = true;
+        self.job_panel
+            .update(cx, |panel, cx| panel.scroll_to_newest(window, cx));
+        cx.notify();
     }
 }
 

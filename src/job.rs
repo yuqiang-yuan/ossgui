@@ -17,7 +17,7 @@ use std::{
 use ali_oss_rs::Client;
 use gpui_kit::{
     App, AppContext, Context, Entity, EventEmitter, InteractiveElement, IntoElement, ParentElement, Render,
-    Styled, Subscription, Task, Window,
+    ScrollStrategy, Styled, Subscription, Task, Window,
     assets::IconName,
     base::{IndexPath, h_flex},
     component::{
@@ -1262,6 +1262,26 @@ impl JobPanel {
             list_state,
             _subs: vec![sub],
         }
+    }
+}
+
+impl JobPanel {
+    /// 滚到最新一条。新任务入队时用 —— 任务是追加在列表末尾的，
+    /// 不滚的话用户看到的是列表顶部的一堆历史任务，刚加的那几行在最下面。
+    pub fn scroll_to_newest(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let count = self.list_state.read(cx).delegate().items_count(0, cx);
+        if count == 0 {
+            return;
+        }
+
+        self.list_state.update(cx, |state, cx| {
+            state.scroll_to_item(
+                IndexPath::new(count - 1),
+                ScrollStrategy::Bottom,
+                window,
+                cx,
+            );
+        });
     }
 }
 
