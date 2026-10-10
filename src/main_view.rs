@@ -123,10 +123,12 @@ impl MainView {
         self.scene = Scene::Objects;
         let this_weak = cx.weak_entity();
         let ossclient = self.ossclient.clone();
+        let job_queue = self.job_queue.clone();
         self.object_list_panel = Some(cx.new(|cx| {
             ObjectListPanel::new(
                 this_weak.clone(),
                 ossclient,
+                job_queue,
                 bucket_name,
                 region,
                 window,
@@ -196,13 +198,6 @@ impl MainView {
             .when(speed.down > 0, |this| {
                 this.child(format!("↓ {}/s", format_file_size(speed.down)))
             })
-    }
-
-    pub fn enqueue_job(&mut self, kind: JobKind, cx: &mut Context<Self>) {
-        let client = self.ossclient.clone();
-        self.job_queue.update(cx, |state, cx| {
-            state.enqueue(kind, client, cx);
-        });
     }
 
     /// 批量入队（上传一个文件夹时可能有几千个文件）

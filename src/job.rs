@@ -16,7 +16,7 @@ use std::{
 
 use ali_oss_rs::Client;
 use gpui_kit::{
-    App, AppContext, Context, Entity, InteractiveElement, IntoElement, ParentElement, Render,
+    App, AppContext, Context, Entity, EventEmitter, InteractiveElement, IntoElement, ParentElement, Render,
     Styled, Subscription, Task, Window,
     assets::IconName,
     base::{IndexPath, h_flex},
@@ -94,10 +94,6 @@ impl JobProgress {
         }
     }
 
-    pub fn new(done: u64, total: Option<u64>) -> Self {
-        Self { done, total }
-    }
-
     pub fn percent(&self) -> f32 {
         match self.total {
             Some(t) if t > 0 => (self.done as f64 / t as f64 * 100.0).min(100.0) as f32,
@@ -146,6 +142,44 @@ impl JobKind {
         }
     }
 
+    /// 任务结束后，会不会改变 `bucket` 下 `prefix` 这个目录的内容？
+    /// 对象列表订阅结束事件后用它决定要不要重新拉取。
+    ///
+    /// 判定用 `starts_with` 而不是"直接子项"：往当前目录上传一个**文件夹**时，
+    /// 新对象的 key 在子目录里，但它会让当前列表多出一个 common_prefix 行 ——
+    /// 用户得看到那个新文件夹。放宽判定的代价（深层上传时多刷几次）由
+    /// 面板侧 500ms 的去抖吸收掉了。
+    pub fn affects_listing(&self, bucket: &str, prefix: &str) -> bool {
+        match self {
+            JobKind::Upload {
+                bucket_name,
+                object_key,
+                ..
+            } => bucket_name == bucket && object_key.starts_with(prefix),
+
+            JobKind::Delete {
+                bucket_name,
+                object_keys,
+            } => {
+                bucket_name == bucket
+                    && object_keys.iter().any(|key| key.starts_with(prefix))
+            }
+
+            // 删的是当前目录的子目录 → 那一行没了；
+            // 当前目录本身在被删的范围内 → 列表清空。两种都要刷
+            JobKind::DeletePrefix {
+                bucket_name,
+                prefix: deleted,
+            } => {
+                bucket_name == bucket
+                    && (deleted.starts_with(prefix) || prefix.starts_with(deleted.as_str()))
+            }
+
+            // 下载不改远端
+            JobKind::Download { .. } => false,
+        }
+    }
+
     /// 获取在 UI 上显示的文本
     fn get_label(&self) -> &str {
         match self {
@@ -160,7 +194,9 @@ impl JobKind {
                     ""
                 }
             }
-            JobKind::DeletePrefix { prefix, .. } => file_name(prefix.as_str()),
+            // prefix 末尾带 '/'（"photos/2026/sub/"），先去掉再取最后一段，
+            // 否则 file_name 会切出一个空串
+            JobKind::DeletePrefix { prefix, .. } => file_name(prefix.trim_end_matches('/')),
         }
     }
 }
@@ -183,7 +219,7 @@ impl JobState {
     }
 }
 
-struct Job {
+pub struct Job {
     id: u64,
     kind: JobKind,
     client: Arc<Client>,
@@ -228,7 +264,6 @@ enum JobSignal {
 
 struct JobCtl {
     signal: watch::Sender<JobSignal>,
-    abort: tokio::task::AbortHandle,
 }
 
 #[derive(Debug, Clone)]
@@ -260,12 +295,6 @@ const SPEED_WINDOW: Duration = Duration::from_secs(3);
 pub struct TransferSpeed {
     pub up: u64,
     pub down: u64,
-}
-
-impl TransferSpeed {
-    pub fn is_idle(&self) -> bool {
-        self.up == 0 && self.down == 0
-    }
 }
 
 /// 一个方向的滑动窗口：只保留 [`SPEED_WINDOW`] 内的采样
@@ -459,26 +488,6 @@ impl JobQueue {
         }
     }
 
-    fn cancel_job(&mut self, id: u64) {
-        let _ = self.tx.send(JobEvent::Cancelled { id });
-    }
-
-    pub fn enqueue(&mut self, kind: JobKind, client: Arc<Client>, cx: &mut Context<Self>) -> u64 {
-        let id = self.next_id;
-        self.next_id += 1;
-
-        self.jobs.push(Job {
-            id,
-            kind,
-            client,
-            state: JobState::Queued,
-        });
-        self.queue_order.push_back(id);
-        self.pump(cx);
-        cx.notify();
-        id
-    }
-
     /// 批量入队：先全部 push，最后统一派发一次。
     ///
     /// 选中一个大目录时可能有几千个文件，逐个走 `enqueue` 会跑几千遍
@@ -531,14 +540,11 @@ impl JobQueue {
             };
 
             let (signal, receiver) = watch::channel(JobSignal::Run);
-            let handle = runner::spawn(run, self.tx.clone(), receiver);
-            self.running.insert(
-                id,
-                JobCtl {
-                    signal,
-                    abort: handle.abort_handle(),
-                },
-            );
+            // JoinHandle 直接丢掉：任务 detach，它的存活不依赖这个句柄。
+            // 队列停掉它靠的是 signal（优雅取消），不是 abort。
+            runner::spawn(run, self.tx.clone(), receiver);
+
+            self.running.insert(id, JobCtl { signal });
             self.set_state(
                 id,
                 JobState::Running {
@@ -554,6 +560,15 @@ impl JobQueue {
     /// 释放一个运行槽位。
     /// 所有终态都必须走这里：漏了 running 泄漏 watch sender，
     /// 漏了 in_flight 队列会永久少一个槽位。
+    /// 广播"某个任务结束了"。订阅方（对象列表）据此决定要不要刷新。
+    ///
+    /// 成功、失败、取消**都要广播**：取消一个文件夹删除时，前面几页可能已经删掉了。
+    fn emit_finished(&self, id: u64, cx: &mut Context<Self>) {
+        if let Some(job) = self.job(id) {
+            cx.emit(job.kind.clone());
+        }
+    }
+
     fn release_slot(&mut self, id: u64) {
         if self.running.remove(&id).is_some() {
             self.in_flight = self.in_flight.saturating_sub(1);
@@ -583,18 +598,21 @@ impl JobQueue {
             JobEvent::Completed { id } => {
                 self.set_state(id, JobState::Completed);
                 self.release_slot(id);
+                self.emit_finished(id, cx);
                 self.pump(cx);
             }
 
             JobEvent::Failed { id, message } => {
                 self.set_state(id, JobState::Failed { message });
                 self.release_slot(id);
+                self.emit_finished(id, cx);
                 self.pump(cx);
             }
 
             JobEvent::Cancelled { id } => {
                 self.set_state(id, JobState::Cancelled);
                 self.release_slot(id);
+                self.emit_finished(id, cx);
                 self.pump(cx);
             }
         }
@@ -645,6 +663,10 @@ impl JobQueue {
     }
 }
 
+/// 任务结束（成功/失败/取消都算）时广播它的 `JobKind`。
+/// 订阅方（对象列表）用 `JobKind::affects_listing` 判断要不要重新拉取当前目录。
+impl EventEmitter<JobKind> for JobQueue {}
+
 /// 本轮要派发的 id：从队首取，直到槽位填满。纯函数，方便单测。
 fn select_dispatch(order: &VecDeque<u64>, in_flight: usize, max: usize) -> Vec<u64> {
     order
@@ -661,10 +683,12 @@ mod runner {
     };
 
     use ali_oss_rs::{
+        bucket::BucketOperations,
+        bucket_common::ListObjectsOptionsBuilder,
         multipart::MultipartUploadsOperations,
         multipart_common::{CompleteMultipartUploadRequest, UploadPartRequest},
         object::ObjectOperations,
-        object_common::PutObjectOptionsBuilder,
+        object_common::{DeleteMultipleObjectsConfig, PutObjectOptionsBuilder},
     };
 
     use crate::common::tokio_runtime;
@@ -691,13 +715,7 @@ mod runner {
                     .await
                 }
                 JobKind::Delete { .. } => run_delete(&run, &tx, ctl).await,
-                JobKind::DeletePrefix { .. } => {
-                    async {
-                        println!("delete prefix job");
-                        Ok(())
-                    }
-                    .await
-                }
+                JobKind::DeletePrefix { .. } => run_delete_prefix(&run, &tx, ctl).await,
             };
 
             let _ = tx.send(match outcome {
@@ -964,6 +982,10 @@ mod runner {
         }
     }
 
+    /// 删除用户显式选中的一组对象。
+    ///
+    /// 每 [`PAGE_SIZE`] 个一批（正好是 `delete_multiple_objects` 的上限），
+    /// 一批一个 checkpoint。删除不产生传输字节，所以进度单位是**对象个数**。
     async fn run_delete(
         run: &JobRun,
         tx: &mpsc::UnboundedSender<JobEvent>,
@@ -981,18 +1003,26 @@ mod runner {
         let mut done = 0u64;
 
         for chunk in object_keys.chunks(PAGE_SIZE as usize) {
+            // 批与批之间是取消的生效点
             match checkpoint(&ctl) {
                 Checkpoint::Continue => {}
                 Checkpoint::Cancel => return Err(JobError::Cancelled),
             }
 
+            // 批内则由这个 select! 负责：请求被 drop = 断连，不用等这一批跑完
             tokio::select! {
+                r = run.client.delete_multiple_objects(
+                        bucket_name,
+                        DeleteMultipleObjectsConfig::FromKeys(chunk),
+                    ) => {
+                    r.map_err(|e| JobError::Failed(e.to_string()))?;
+                }
                 _ = ctl.wait_for(|s| *s == JobSignal::Cancel) => {
                     return Err(JobError::Cancelled)
-                },
+                }
             }
 
-            done = done + chunk.len() as u64;
+            done += chunk.len() as u64;
             let _ = tx.send(JobEvent::Progress {
                 id: run.id,
                 // 删除是元数据操作，不产生传输字节
@@ -1003,30 +1033,97 @@ mod runner {
                 },
             });
         }
+
         Ok(())
     }
-}
 
-/// 假的上传一片：随机睡 300~1500ms，模拟网络耗时
-async fn fake_upload_part(_bytes: u64) {
-    tokio::time::sleep(Duration::from_millis(random_ms(300, 1500))).await;
-}
+    /// 删除整个前缀（文件夹）。
+    ///
+    /// OSS 没有目录，所以只能"边列边删"：列一页 → 删这一页 → 拿游标列下一页。
+    /// 一页正好是 [`PAGE_SIZE`] 个，也就等于 `delete_multiple_objects` 的上限，
+    /// 所以"一页 = 一批 = 一个 checkpoint"。
+    ///
+    /// 进度单位是**对象个数**。总量只有在第一页就列完（小目录）时才知道；
+    /// 多页时保持不定量 —— 最后一页才冒出总量会让进度条从 90% 跳到 100%。
+    ///
+    /// 注意：列表和删除之间没有原子性，枚举期间新传进来的对象不会被删掉。
+    /// 这是所有 OSS 客户端的共同行为。
+    async fn run_delete_prefix(
+        run: &JobRun,
+        tx: &mpsc::UnboundedSender<JobEvent>,
+        mut ctl: watch::Receiver<JobSignal>,
+    ) -> Result<(), JobError> {
+        let JobKind::DeletePrefix { bucket_name, prefix } = &run.kind else {
+            unreachable!()
+        };
 
-async fn fake_upload() {
-    tokio::time::sleep(Duration::from_millis(random_ms(300, 1500))).await;
-}
+        let mut token: Option<String> = None;
+        let mut done = 0u64;
 
-/// 无依赖的伪随机：拿系统时间的纳秒位混淆一下。
-/// 只给假任务用，别拿它做正经事。
-fn random_ms(min: u64, max: u64) -> u64 {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0);
-    let mixed = nanos
-        .wrapping_mul(6364136223846793005)
-        .wrapping_add(1442695040888963407);
-    min + (mixed >> 33) % (max - min).max(1)
+        loop {
+            // 页与页之间是取消的生效点
+            match checkpoint(&ctl) {
+                Checkpoint::Continue => {}
+                Checkpoint::Cancel => return Err(JobError::Cancelled),
+            }
+
+            let mut options = ListObjectsOptionsBuilder::new()
+                .prefix(prefix.clone())
+                .max_keys(PAGE_SIZE); // 不带 delimiter 才是递归列出全部
+            if let Some(t) = token.clone() {
+                options = options.continuation_token(t);
+            }
+
+            let page = tokio::select! {
+                r = run.client.list_objects(bucket_name, Some(options.build())) => {
+                    r.map_err(|e| JobError::Failed(e.to_string()))?
+                }
+                _ = ctl.wait_for(|s| *s == JobSignal::Cancel) => {
+                    return Err(JobError::Cancelled)
+                }
+            };
+
+            // contents 里包含文件夹标记对象本身（key == prefix），要一起删
+            let keys: Vec<String> = page.contents.iter().map(|o| o.key.clone()).collect();
+
+            // 小目录一页就列完了，这时总量是确定的
+            let total = if done == 0 && !page.is_truncated {
+                Some(keys.len() as u64)
+            } else {
+                None
+            };
+
+            if !keys.is_empty() {
+                tokio::select! {
+                    r = run.client.delete_multiple_objects(
+                            bucket_name,
+                            DeleteMultipleObjectsConfig::FromKeys(&keys),
+                        ) => {
+                        r.map_err(|e| JobError::Failed(e.to_string()))?;
+                    }
+                    _ = ctl.wait_for(|s| *s == JobSignal::Cancel) => {
+                        return Err(JobError::Cancelled)
+                    }
+                }
+
+                done += keys.len() as u64;
+                let _ = tx.send(JobEvent::Progress {
+                    id: run.id,
+                    delta_bytes: 0,
+                    progress: JobProgress { done, total },
+                });
+            }
+
+            let next = page.next_continuation_token.clone();
+            // 防御：truncated 却没给游标的话会原地死循环
+            if !page.is_truncated || next.is_none() {
+                break;
+            }
+            token = next;
+        }
+
+        Ok(())
+    }
 }
 
 struct JobListDelegate {
@@ -1119,9 +1216,12 @@ impl ListDelegate for JobListDelegate {
                                             .rounded_full()
                                             .tooltip("Cancel")
                                             .on_click(cx.listener(move |state, _, _, cx| {
-                                                state.delegate_mut().queue.update(cx, |q, _| {
-                                                    q.cancel_job(job_id);
-                                                });
+                                                state.delegate_mut().queue.update(
+                                                    cx,
+                                                    |queue, cx| {
+                                                        queue.cancel(job_id, cx);
+                                                    },
+                                                );
                                             })),
                                     )
                                 }),
@@ -1142,7 +1242,6 @@ impl ListDelegate for JobListDelegate {
 }
 
 pub struct JobPanel {
-    queue: Entity<JobQueue>,
     list_state: Entity<ListState<JobListDelegate>>,
     _subs: Vec<Subscription>,
 }
@@ -1160,257 +1259,20 @@ impl JobPanel {
         let list_state = cx.new(|cx| ListState::new(delegate, window, cx).selectable(false));
 
         Self {
-            queue,
             list_state,
             _subs: vec![sub],
         }
     }
-
-    // 让 List 重新测量布局。
-    // VirtualList 首次布局时还不知道可用宽度（last_content_size 为空），
-    // 会用一个不受约束的宽度量样例行，导致 content_size.width 偏大。
-    // 补一次布局就能拿到正确宽度。
-    // pub fn refresh_list(&mut self, cx: &mut Context<Self>) {
-    //     self.list_state.update(cx, |_, cx| cx.notify());
-    // }
 }
 
 impl Render for JobPanel {
     fn render(
         &mut self,
-        window: &mut gpui_kit::Window,
-        cx: &mut Context<Self>,
+        _window: &mut gpui_kit::Window,
+        _cx: &mut Context<Self>,
     ) -> impl gpui_kit::prelude::IntoElement {
         div()
             .size_full()
             .child(List::new(&self.list_state).size_full())
     }
-}
-
-fn gen_test_data() -> Vec<Job> {
-    vec![
-        // ---------------- Upload × 5 state ----------------
-        Job {
-            id: 1,
-            kind: JobKind::Upload {
-                bucket_name: "demo-hangzhou".into(),
-                object_key: "photos/2026/IMG_0001.jpg".into(),
-                source: "/tmp/IMG_0001.jpg".into(),
-                size: 44_040_192,
-                relative: "photos/2026/IMG_0001.jpg".into(),
-            },
-            client: Arc::new(Client::from_env()),
-            state: JobState::Queued,
-        },
-        Job {
-            id: 2,
-            kind: JobKind::Upload {
-                bucket_name: "demo-hangzhou".into(),
-                object_key: "photos/2026/IMG_0001.jpg".into(),
-                source: "/tmp/IMG_0001.jpg".into(),
-                size: 44_040_192,
-                relative: "photos/2026/IMG_0001.jpg".into(),
-            },
-            client: Arc::new(Client::from_env()),
-            state: JobState::Running {
-                progress: JobProgress::unknown(),
-            },
-        },
-        Job {
-            id: 3,
-            kind: JobKind::Upload {
-                bucket_name: "demo-hangzhou".into(),
-                object_key: "photos/2026/IMG_0001.jpg".into(),
-                source: "/tmp/IMG_0001.jpg".into(),
-                size: 44_040_192,
-                relative: "photos/2026/IMG_0001.jpg".into(),
-            },
-            client: Arc::new(Client::from_env()),
-            state: JobState::Completed,
-        },
-        Job {
-            id: 4,
-            kind: JobKind::Upload {
-                bucket_name: "demo-hangzhou".into(),
-                object_key: "photos/2026/IMG_0001.jpg".into(),
-                source: "/tmp/IMG_0001.jpg".into(),
-                size: 44_040_192,
-                relative: "photos/2026/IMG_0001.jpg".into(),
-            },
-            client: Arc::new(Client::from_env()),
-            state: JobState::Failed {
-                message: "AccessDenied: Access denied by bucket policy.".into(),
-            },
-        },
-        Job {
-            id: 5,
-            kind: JobKind::Upload {
-                bucket_name: "demo-hangzhou".into(),
-                object_key: "photos/2026/IMG_0001.jpg".into(),
-                source: "/tmp/IMG_0001.jpg".into(),
-                size: 44_040_192,
-                relative: "photos/2026/IMG_0001.jpg".into(),
-            },
-            client: Arc::new(Client::from_env()),
-            state: JobState::Cancelled,
-        },
-        // ---------------- Download × 5 state ----------------
-        Job {
-            id: 6,
-            kind: JobKind::Download {
-                bucket_name: "demo-beijing".into(),
-                object_key: "docs/2026/q3-report-final-v7.pdf".into(),
-                target: "/tmp/q3-report-final-v7.pdf".into(),
-            },
-            client: Arc::new(Client::from_env()),
-            state: JobState::Queued,
-        },
-        Job {
-            id: 7,
-            kind: JobKind::Download {
-                bucket_name: "demo-beijing".into(),
-                object_key: "docs/2026/q3-report-final-v7.pdf".into(),
-                target: "/tmp/q3-report-final-v7.pdf".into(),
-            },
-            client: Arc::new(Client::from_env()),
-            state: JobState::Running {
-                progress: JobProgress::unknown(),
-            },
-        },
-        Job {
-            id: 8,
-            kind: JobKind::Download {
-                bucket_name: "demo-beijing".into(),
-                object_key: "docs/2026/q3-report-final-v7.pdf".into(),
-                target: "/tmp/q3-report-final-v7.pdf".into(),
-            },
-            client: Arc::new(Client::from_env()),
-            state: JobState::Completed,
-        },
-        Job {
-            id: 9,
-            kind: JobKind::Download {
-                bucket_name: "demo-beijing".into(),
-                object_key: "docs/2026/q3-report-final-v7.pdf".into(),
-                target: "/tmp/q3-report-final-v7.pdf".into(),
-            },
-            client: Arc::new(Client::from_env()),
-            state: JobState::Failed {
-                message: "NoSuchKey: The specified key does not exist.".into(),
-            },
-        },
-        Job {
-            id: 10,
-            kind: JobKind::Download {
-                bucket_name: "demo-beijing".into(),
-                object_key: "docs/2026/q3-report-final-v7.pdf".into(),
-                target: "/tmp/q3-report-final-v7.pdf".into(),
-            },
-            client: Arc::new(Client::from_env()),
-            state: JobState::Cancelled,
-        },
-        // ---------------- Delete × 5 state ----------------
-        Job {
-            id: 11,
-            kind: JobKind::Delete {
-                bucket_name: "photos-prod".into(),
-                object_keys: vec!["cache/warehouse/session_events_2026_10_09.parquet".into()],
-            },
-            client: Arc::new(Client::from_env()),
-            state: JobState::Queued,
-        },
-        Job {
-            id: 12,
-            kind: JobKind::Delete {
-                bucket_name: "photos-prod".into(),
-                object_keys: vec!["cache/warehouse/session_events_2026_10_09.parquet".into()],
-            },
-            client: Arc::new(Client::from_env()),
-            state: JobState::Running {
-                progress: JobProgress {
-                    done: 1234,
-                    total: Some(2234),
-                },
-            },
-        },
-        Job {
-            id: 13,
-            kind: JobKind::Delete {
-                bucket_name: "photos-prod".into(),
-                object_keys: vec!["cache/warehouse/session_events_2026_10_09.parquet".into()],
-            },
-            client: Arc::new(Client::from_env()),
-            state: JobState::Completed,
-        },
-        Job {
-            id: 14,
-            kind: JobKind::Delete {
-                bucket_name: "photos-prod".into(),
-                object_keys: vec!["cache/warehouse/session_events_2026_10_09.parquet".into()],
-            },
-            client: Arc::new(Client::from_env()),
-            state: JobState::Failed {
-                message: "AccessDenied: Access denied by bucket policy.".into(),
-            },
-        },
-        Job {
-            id: 15,
-            kind: JobKind::Delete {
-                bucket_name: "photos-prod".into(),
-                object_keys: vec!["cache/warehouse/session_events_2026_10_09.parquet".into()],
-            },
-            client: Arc::new(Client::from_env()),
-            state: JobState::Cancelled,
-        },
-        // ---------------- DeletePrefix × 5 state ----------------
-        Job {
-            id: 16,
-            kind: JobKind::DeletePrefix {
-                bucket_name: "backup-cold".into(),
-                prefix: "archive/2025/backup/".into(),
-            },
-            client: Arc::new(Client::from_env()),
-            state: JobState::Queued,
-        },
-        Job {
-            id: 17,
-            kind: JobKind::DeletePrefix {
-                bucket_name: "backup-cold".into(),
-                prefix: "archive/2025/backup/".into(),
-            },
-            client: Arc::new(Client::from_env()),
-            state: JobState::Running {
-                progress: JobProgress::unknown(),
-            },
-        },
-        Job {
-            id: 18,
-            kind: JobKind::DeletePrefix {
-                bucket_name: "backup-cold".into(),
-                prefix: "archive/2025/backup/".into(),
-            },
-            client: Arc::new(Client::from_env()),
-            state: JobState::Completed,
-        },
-        Job {
-            id: 19,
-            kind: JobKind::DeletePrefix {
-                bucket_name: "backup-cold".into(),
-                prefix: "archive/2025/backup/".into(),
-            },
-            client: Arc::new(Client::from_env()),
-            state: JobState::Failed {
-                message: "NoSuchBucket: The specified bucket does not exist.".into(),
-            },
-        },
-        Job {
-            id: 20,
-            kind: JobKind::DeletePrefix {
-                bucket_name: "backup-cold".into(),
-                prefix: "archive/2025/backup/".into(),
-            },
-            client: Arc::new(Client::from_env()),
-            state: JobState::Cancelled,
-        },
-    ]
 }

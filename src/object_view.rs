@@ -1,4 +1,4 @@
-use std::{cmp::Ordering, collections::HashSet, path::PathBuf, sync::Arc};
+use std::{cmp::Ordering, collections::HashSet, path::PathBuf, sync::Arc, time::Duration};
 
 use ali_oss_rs::{
     Client,
@@ -19,7 +19,7 @@ use gpui_kit::{
     },
     component::{
         ActiveTheme, Icon, Sizable, WindowExt,
-        button::{Button, ButtonVariants},
+        button::{Button, ButtonVariant, ButtonVariants},
         checkbox::Checkbox,
         description_list::{DescriptionItem, DescriptionList},
         input::Input,
@@ -40,7 +40,7 @@ use crate::{
     common::{
         AbortOnDrop, LoadState, format_datetime, format_file_size, oss_region_map, tokio_runtime,
     },
-    job::JobKind,
+    job::{JobKind, JobQueue},
     main_view::MainView,
 };
 
@@ -59,11 +59,21 @@ pub struct ObjectListPanel {
     page_size_state: Entity<SelectState<Vec<&'static str>>>,
 
     create_folder_task: Task<()>,
+
+    /// 已经排上了一次后台刷新（去抖窗口内不再排）
+    refresh_pending: bool,
+    /// 刷新请求撞上了正在飞的加载 → 这次加载完再补一次
+    refresh_again: bool,
+
     _subs: Vec<Subscription>,
 }
 
 /// 一次上传最多入队多少个文件。选中一个大目录时防止把队列和面板撑爆。
 const MAX_UPLOAD_FILES: usize = 5000;
+
+/// 任务结束后的刷新去抖窗口。
+/// 传一个文件夹可能有几千个任务陆续完成，不能每个都去拉一次列表。
+const REFRESH_DEBOUNCE: Duration = Duration::from_millis(500);
 
 /// 扫描结果：一个待上传的文件
 struct UploadCandidate {
@@ -167,6 +177,7 @@ impl ObjectListPanel {
     pub fn new(
         main_view: WeakEntity<MainView>,
         ossclient: Arc<Client>,
+        job_queue: Entity<JobQueue>,
         bucket_name: String,
         region: String,
         window: &mut Window,
@@ -214,6 +225,14 @@ impl ObjectListPanel {
             },
         );
 
+        // 任务结束时判断要不要刷新当前目录。
+        // 订阅挂在面板上：面板销毁（切场景）时自动断掉
+        let job_sub = cx.subscribe(&job_queue, |this, _queue, kind: &JobKind, cx| {
+            if kind.affects_listing(&this.bucket_name, &this.prefix) {
+                this.schedule_refresh(cx);
+            }
+        });
+
         let this_weak = cx.weak_entity();
         let endpoint = oss_region_map()
             .get(region.as_str())
@@ -239,7 +258,9 @@ impl ObjectListPanel {
                     .cell_selectable(false)
             }),
             create_folder_task: Task::ready(()),
-            _subs: vec![search_sub, page_size_sub],
+            refresh_pending: false,
+            refresh_again: false,
+            _subs: vec![search_sub, page_size_sub, job_sub],
         };
 
         cx.on_next_frame(window, |this, _, cx| this.load_objects(cx));
@@ -247,16 +268,53 @@ impl ObjectListPanel {
         this
     }
 
+    /// 用户主动重新拉取（翻页、切目录、改 page size）：显示加载态
     fn load_objects(&mut self, cx: &mut Context<Self>) {
+        self.load_objects_inner(false, cx);
+    }
+
+    /// 任务结束后台刷新：不显示加载态，旧行保留到新数据到达
+    fn refresh_objects(&mut self, cx: &mut Context<Self>) {
+        self.load_objects_inner(true, cx);
+    }
+
+    /// 排一次后台刷新，去抖窗口内的多次请求合并成一次
+    fn schedule_refresh(&mut self, cx: &mut Context<Self>) {
+        if self.refresh_pending {
+            return;
+        }
+        self.refresh_pending = true;
+
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(REFRESH_DEBOUNCE).await;
+
+            this.update(cx, |this, cx| {
+                this.refresh_pending = false;
+                // 判定和拉取都发生在"现在"：这 500ms 里用户可能已经翻页或换目录了，
+                // 换目录的情况由 affects_listing 在下次事件时重新判断
+                this.refresh_objects(cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn load_objects_inner(&mut self, silent: bool, cx: &mut Context<Self>) {
         if self.load_state == LoadState::Loading {
+            // 加载中来的刷新请求不能丢，否则列表会一直停在旧数据
+            if silent {
+                self.refresh_again = true;
+            }
             return;
         }
 
-        println!("loading objects with prefix: {}", self.prefix);
-
         self.load_state = LoadState::Loading;
-        self.objects_state
-            .update(cx, |state, _| state.delegate_mut().loading = true);
+
+        // 静默刷新不动 loading 标志 —— 否则表格每 500ms 闪一次骨架屏
+        if !silent {
+            self.objects_state
+                .update(cx, |state, _| state.delegate_mut().loading = true);
+        }
         cx.notify();
 
         let client = self.ossclient.clone();
@@ -325,19 +383,39 @@ impl ObjectListPanel {
                                     .map(|s| OssObjectItem::File(s)),
                             );
 
-                            state.delegate_mut().set_rows(rows);
+                            if silent {
+                                // 后台刷新：勾选按 key 保留（被删掉的自然消失）
+                                state.delegate_mut().refresh_rows(rows);
+                            } else {
+                                // 用户主动换页/换目录：清空勾选是对的
+                                state.delegate_mut().set_rows(rows);
+                            }
                             state.delegate_mut().set_prefix(prefix);
                             cx.notify();
                         });
                     }
                     Err(e) => {
-                        let msg = e.to_string();
                         this.load_state = LoadState::Failed;
-                        window.push_notification((NotificationType::Error, msg), cx);
+                        // 静默刷新失败就安静地算了 —— 用户没主动做什么，弹错误太突兀
+                        if !silent {
+                            window.push_notification(
+                                (NotificationType::Error, e.to_string()),
+                                cx,
+                            );
+                        }
                     }
                 }
                 this.objects_state.update(cx, |state, _| state.delegate_mut().loading = false);
                 cx.notify();
+
+                // 这次加载期间又攒了刷新请求 → 让当前任务先收尾，再补一次
+                if this.refresh_again {
+                    this.refresh_again = false;
+                    cx.spawn(async move |this, cx| {
+                        this.update(cx, |this, cx| this.refresh_objects(cx)).ok();
+                    })
+                    .detach();
+                }
             })
             .ok();
         });
@@ -555,7 +633,10 @@ impl ObjectListPanel {
                     .tooltip("Next page")
                     .icon(IconName::ChevronRight)
                     .disabled(!self.is_truncated)
-                    .loading(self.load_state == LoadState::Loading)
+                    // 用表格自己的 loading 标志，而不是 load_state：
+                    // 后台静默刷新也会把 load_state 置成 Loading，但那是用户看不见的，
+                    // 让这个按钮一直转圈会显得像卡住了
+                    .loading(self.objects_state.read(cx).delegate().loading)
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.load_objects(cx);
                     })),
@@ -701,6 +782,103 @@ impl ObjectListPanel {
         .detach();
     }
 
+    /// 删除当前勾选的对象。
+    ///
+    /// 勾选里可能混着文件夹（`common_prefixes` 里的虚拟目录），
+    /// 它们各自变成一个 `DeletePrefix` 任务（连同内容一起删），
+    /// 文件则合成一个 `Delete` 任务（批量删，每 1000 个一批）。
+    fn on_delete_action(&mut self, _: &DeleteAction, window: &mut Window, cx: &mut Context<Self>) {
+        let (files, folders) = {
+            let delegate = self.objects_state.read(cx).delegate();
+            let mut files: Vec<String> = Vec::new();
+            let mut folders: Vec<String> = Vec::new();
+
+            for &ix in &delegate.selected_indexes {
+                let Some(row) = delegate.rows.get(ix) else {
+                    continue;
+                };
+                match row {
+                    OssObjectItem::File(_) => files.push(row.get_key().clone()),
+                    OssObjectItem::Folder(prefix) => folders.push(prefix.clone()),
+                }
+            }
+
+            (files, folders)
+        };
+
+        if files.is_empty() && folders.is_empty() {
+            return;
+        }
+
+        let title = match (files.len(), folders.len()) {
+            (1, 0) => "Delete 1 object?".to_string(),
+            (n, 0) => format!("Delete {n} objects?"),
+            (0, 1) => "Delete 1 folder?".to_string(),
+            (0, n) => format!("Delete {n} folders?"),
+            (f, d) => format!("Delete {f} objects and {d} folders?"),
+        };
+        let description = if folders.is_empty() {
+            "This can't be undone."
+        } else {
+            "Folders are deleted with everything inside them. This can't be undone."
+        };
+
+        let bucket_name = self.bucket_name.clone();
+        let main_view = self.main_view.clone();
+        let panel = cx.weak_entity();
+
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let bucket_name = bucket_name.clone();
+            let main_view = main_view.clone();
+            let panel = panel.clone();
+            let files = files.clone();
+            let folders = folders.clone();
+
+            alert
+                .confirm()
+                .title(title.clone())
+                .description(description)
+                .ok_text("Delete")
+                .ok_variant(ButtonVariant::Danger)
+                .on_ok(move |_, _, cx| {
+                    // 一个对象一个任务：每个文件、每个文件夹在面板上各占一行，
+                    // 各自有独立的进度和取消。
+                    // （代价是每个对象一次 HTTP 请求，批量删除那套 1000 个一批的
+                    //   能力还在 run_delete 里留着，以后想换回来只改这里。）
+                    let mut kinds: Vec<JobKind> = Vec::new();
+
+                    for key in &files {
+                        kinds.push(JobKind::Delete {
+                            bucket_name: bucket_name.clone(),
+                            object_keys: vec![key.clone()],
+                        });
+                    }
+                    for prefix in &folders {
+                        kinds.push(JobKind::DeletePrefix {
+                            bucket_name: bucket_name.clone(),
+                            prefix: prefix.clone(),
+                        });
+                    }
+
+                    main_view
+                        .update(cx, move |main_view, cx| main_view.enqueue_jobs(kinds, cx))
+                        .ok();
+
+                    // 已经交给队列了，清掉勾选
+                    panel
+                        .update(cx, |panel, cx| {
+                            panel.objects_state.update(cx, |state, cx| {
+                                state.delegate_mut().unselect_all();
+                                cx.notify();
+                            });
+                        })
+                        .ok();
+
+                    true // 关闭对话框
+                })
+        });
+    }
+
     fn on_open_files_for_upload_action(
         &mut self,
         _: &OpenFilesForUploadAction,
@@ -725,6 +903,7 @@ impl Render for ObjectListPanel {
         div()
             .on_action(cx.listener(Self::on_open_files_for_upload_action))
             .on_action(cx.listener(Self::on_open_folders_for_upload_action))
+            .on_action(cx.listener(Self::on_delete_action))
             .size_full()
             .v_flex()
             .gap_2()
@@ -877,6 +1056,35 @@ impl ObjectTableDelegate {
     fn set_rows(&mut self, rows: Vec<OssObjectItem>) {
         self.selected_indexes.clear();
         self.rows = rows;
+        self.loading = false;
+        self.recompute();
+    }
+
+    /// 后台刷新专用：**保留勾选**。
+    ///
+    /// `selected_indexes` 存的是 `rows` 的下标，换一批 rows 就全错位了，
+    /// 所以先把勾选的 key 记下来，替换完再按 key 找回新下标。
+    /// 被删掉的对象在新 rows 里找不到，自然从勾选里消失 —— 正是想要的。
+    ///
+    /// （换页用的 `set_rows` 清空勾选是对的，两者不要混。）
+    fn refresh_rows(&mut self, rows: Vec<OssObjectItem>) {
+        let selected_keys: HashSet<String> = self
+            .selected_indexes
+            .iter()
+            .filter_map(|&ix| self.rows.get(ix))
+            .map(|row| row.get_key().clone())
+            .collect();
+
+        self.rows = rows;
+
+        self.selected_indexes = self
+            .rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| selected_keys.contains(row.get_key()))
+            .map(|(ix, _)| ix)
+            .collect();
+
         self.loading = false;
         self.recompute();
     }
@@ -1354,7 +1562,7 @@ impl ObjectMetaPanel {
                         .h_56()
                         .flex()
                         .items_center()
-                        .justify_end()
+                        .justify_center()
                         .text_sm()
                         .text_color(cx.theme().secondary_foreground)
                         .child("Preview not supported for this object")
