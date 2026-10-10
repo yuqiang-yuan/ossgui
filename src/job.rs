@@ -287,6 +287,32 @@ impl JobQueue {
         id
     }
 
+    /// 批量入队：先全部 push，最后统一派发一次。
+    ///
+    /// 选中一个大目录时可能有几千个文件，逐个走 `enqueue` 会跑几千遍
+    /// `pump` + `notify`（虽然 notify 只是置脏位，但语义上没必要）。
+    pub fn enqueue_many(
+        &mut self,
+        jobs: impl IntoIterator<Item = (JobKind, Arc<Client>)>,
+        cx: &mut Context<Self>,
+    ) {
+        for (kind, client) in jobs {
+            let id = self.next_id;
+            self.next_id += 1;
+
+            self.jobs.push(Job {
+                id,
+                kind,
+                client,
+                state: JobState::Queued,
+            });
+            self.queue_order.push_back(id);
+        }
+
+        self.pump(cx);
+        cx.notify();
+    }
+
     fn pump(&mut self, cx: &mut Context<Self>) {
         let dispatch = select_dispatch(&self.queue_order, self.in_flight, self.max_concurrency);
         if dispatch.is_empty() {

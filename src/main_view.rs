@@ -176,6 +176,14 @@ impl MainView {
             state.enqueue(kind, client, cx);
         });
     }
+
+    /// 批量入队（上传一个文件夹时可能有几千个文件）
+    pub fn enqueue_jobs(&mut self, kinds: Vec<JobKind>, cx: &mut Context<Self>) {
+        let client = self.ossclient.clone();
+        self.job_queue.update(cx, |state, cx| {
+            state.enqueue_many(kinds.into_iter().map(|kind| (kind, client.clone())), cx);
+        });
+    }
 }
 
 impl Render for MainView {

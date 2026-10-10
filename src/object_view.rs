@@ -1,4 +1,4 @@
-use std::{cmp::Ordering, collections::HashSet, sync::Arc};
+use std::{cmp::Ordering, collections::HashSet, path::PathBuf, sync::Arc};
 
 use ali_oss_rs::{
     Client,
@@ -60,6 +60,98 @@ pub struct ObjectListPanel {
 
     create_folder_task: Task<()>,
     _subs: Vec<Subscription>,
+}
+
+/// 一次上传最多入队多少个文件。选中一个大目录时防止把队列和面板撑爆。
+const MAX_UPLOAD_FILES: usize = 5000;
+
+/// 扫描结果：一个待上传的文件
+struct UploadCandidate {
+    source: PathBuf,
+    /// 相对选中根的路径，用来拼 object key。
+    /// 选中目录本身的名字会保留：`/home/me/pics/vacation/day1/a.jpg` → `vacation/day1/a.jpg`
+    relative: PathBuf,
+    size: u64,
+}
+
+/// 把用户选中的路径展开成待上传文件列表。
+///
+/// - 文件：原样收下
+/// - 目录：递归展开（用显式栈，避免深目录把调用栈压爆）
+/// - 符号链接和特殊文件：跳过。`DirEntry::file_type()` 不跟随符号链接，
+///   所以不会传出目录树、也不会有环
+///
+/// 纯本地 I/O，**必须在后台执行器上调用**。
+/// 返回 `(文件列表, 是否因为超过 MAX_UPLOAD_FILES 被截断)`。
+fn scan_upload_paths(paths: Vec<PathBuf>) -> (Vec<UploadCandidate>, bool) {
+    let mut out = Vec::new();
+    let mut truncated = false;
+
+    for path in paths {
+        if truncated {
+            break;
+        }
+
+        // 用户显式选中的路径：跟随符号链接是对的
+        let Ok(meta) = std::fs::metadata(&path) else {
+            continue;
+        };
+
+        if !meta.is_dir() {
+            out.push(UploadCandidate {
+                relative: PathBuf::from(path.file_name().unwrap_or_default()),
+                source: path,
+                size: meta.len(),
+            });
+            continue;
+        }
+
+        let root_name = path.file_name().map(PathBuf::from).unwrap_or_default();
+        let mut stack = vec![path.clone()];
+
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue; // 没权限的目录直接跳过，不中断整次扫描
+            };
+
+            for entry in entries.flatten() {
+                let Ok(file_type) = entry.file_type() else {
+                    continue;
+                };
+                let child = entry.path();
+
+                if file_type.is_dir() {
+                    stack.push(child);
+                } else if file_type.is_file() {
+                    let Ok(size) = entry.metadata().map(|m| m.len()) else {
+                        continue; // 遍历途中被删了
+                    };
+                    let Ok(rel) = child.strip_prefix(&path) else {
+                        continue;
+                    };
+                    // 先把借用用掉，下面才能把 child 移进 UploadCandidate
+                    let relative = root_name.join(rel);
+
+                    out.push(UploadCandidate {
+                        source: child,
+                        relative,
+                        size,
+                    });
+
+                    if out.len() >= MAX_UPLOAD_FILES {
+                        truncated = true;
+                        break;
+                    }
+                }
+            }
+
+            if truncated {
+                break;
+            }
+        }
+    }
+
+    (out, truncated)
 }
 
 impl ObjectListPanel {
@@ -505,49 +597,98 @@ impl ObjectListPanel {
         });
     }
 
-    /// 这里的文件选择对话框，不能同时选择文件和文件夹。所以需要一个参数来设置是选择文件夹还是选择文件
+    /// 打开上传用的文件/文件夹选择器。
+    ///
+    /// Linux 的 xdg-portal 实现会**忽略 `files`**：`directories: true` 就是文件夹
+    /// 选择器，两者只能二选一，所以 `folder_only` 只在 Linux 上有意义。
+    /// 其他平台两个都可以为 true，用户在一个对话框里既能选文件也能选目录。
     fn select_files_for_upload(
         &mut self,
         folder_only: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        #[cfg(target_os = "linux")]
+        let (files, directories) = (!folder_only, folder_only);
+        #[cfg(not(target_os = "linux"))]
+        let (files, directories) = {
+            let _ = folder_only;
+            (true, true)
+        };
+
         let picked = cx.prompt_for_paths(PathPromptOptions {
-            files: !folder_only,
-            directories: folder_only,
+            files,
+            directories,
             multiple: true,
-            prompt: None,
+            prompt: Some("Upload".into()),
         });
 
-        cx.spawn(async move |this, cx| {
+        let main_view = self.main_view.clone();
+        let bucket_name = self.bucket_name.clone();
+        let prefix = self.prefix.clone();
+
+        cx.spawn_in(window, async move |_, cx| {
             let paths = match picked.await {
                 Ok(Ok(Some(paths))) if !paths.is_empty() => paths,
-                _ => return,
-            };
-
-            this.update(cx, |this, cx| {
-                let bucket_name = this.bucket_name.clone();
-                let prefix = this.prefix.clone();
-                this.main_view
-                    .update(cx, move |main_view, cx| {
-                        for p in paths {
-                            let Some(file_name) = p.file_name().map(|s| s.to_str().unwrap_or("")) else { continue };
-                            let object_key = format!("{}{}", prefix, file_name);
-
-                            main_view.enqueue_job(
-                                JobKind::Upload {
-                                    bucket_name: bucket_name.clone(),
-                                    object_key: object_key,
-                                    source: p,
-                                    size: 0u64,
-                                },
-                                cx,
-                            );
-                        }
+                Ok(Err(err)) => {
+                    // Linux 上多半是 xdg-desktop-portal 没跑
+                    cx.update(|window, cx| {
+                        window.push_notification(
+                            (
+                                NotificationType::Error,
+                                format!("Couldn't open the picker: {err}"),
+                            ),
+                            cx,
+                        );
                     })
                     .ok();
+                    return;
+                }
+                _ => return, // 用户取消
+            };
 
-                cx.notify();
+            // 展开目录是本地 I/O，放后台执行器，UI 线程不碰
+            let (candidates, truncated) = cx
+                .background_spawn(async move { scan_upload_paths(paths) })
+                .await;
+
+            if candidates.is_empty() {
+                cx.update(|window, cx| {
+                    window.push_notification(
+                        (NotificationType::Warning, "No files found in the selection"),
+                        cx,
+                    );
+                })
+                .ok();
+                return;
+            }
+
+            let count = candidates.len();
+            let kinds: Vec<JobKind> = candidates
+                .into_iter()
+                .map(|candidate| JobKind::Upload {
+                    bucket_name: bucket_name.clone(),
+                    // Windows 上是 '\'，而 OSS 的 key 只认 '/'
+                    object_key: format!(
+                        "{prefix}{}",
+                        candidate.relative.to_string_lossy().replace('\\', "/")
+                    ),
+                    source: candidate.source,
+                    size: candidate.size,
+                })
+                .collect();
+
+            main_view
+                .update(cx, move |main_view, cx| main_view.enqueue_jobs(kinds, cx))
+                .ok();
+
+            cx.update(|window, cx| {
+                let msg = if truncated {
+                    format!("Added the first {count} files (limit reached)")
+                } else {
+                    format!("Added {count} files")
+                };
+                window.push_notification((NotificationType::Success, msg), cx);
             })
             .ok();
         })
