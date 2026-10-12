@@ -476,7 +476,8 @@ impl ObjectListPanel {
                     .child({
                         let main_view = self.main_view.clone();
                         Button::new("breadcrumb-home-button")
-                            .text()
+                            .ghost()
+                            .small()
                             .label("oss://")
                             .on_click(move |_, window, cx| {
                                 main_view
@@ -488,7 +489,8 @@ impl ObjectListPanel {
                     })
                     .child(
                         Button::new("breadcrumb-bucket-button")
-                            .text()
+                            .ghost()
+                            .small()
                             .label(self.bucket_name.clone())
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.prefix = String::new();
@@ -520,7 +522,8 @@ impl ObjectListPanel {
                 acc.push('/');
                 let prefix = acc.clone();
                 Button::new(format!("breadcrumb-prefix-{}", acc))
-                    .text()
+                    .ghost()
+                    .small()
                     .label(format!("/{p}"))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.prefix = prefix.clone();
@@ -613,20 +616,32 @@ impl ObjectListPanel {
                     })),
             )
             .child(
-                Button::new("more-button")
-                    .label("More")
-                    .dropdown_caret(true)
-                    .dropdown_menu(|menu, _, _| {
-                        menu.menu_with_icon("Copy", IconName::Copy, Box::new(CopyAction))
-                            .menu_with_icon("Cut", IconName::ClipboardX, Box::new(CutAction))
-                            .menu_with_icon(
-                                "Paste",
-                                IconName::ClipboardPaste,
-                                Box::new(PasteAction),
-                            )
-                            .separator()
-                            .menu_with_icon("Delete", IconName::Trash, Box::new(DeleteAction))
-                    }),
+                {
+                    let danger = cx.theme().danger;
+
+                    Button::new("more-button")
+                        .label("More")
+                        .dropdown_caret(true)
+                        .dropdown_menu(move |menu, _, _| {
+                            // menu.menu_with_icon("Copy", IconName::Copy, Box::new(CopyAction))
+                            //     .menu_with_icon("Cut", IconName::ClipboardX, Box::new(CutAction))
+                            //     .menu_with_icon(
+                            //         "Paste",
+                            //         IconName::ClipboardPaste,
+                            //         Box::new(PasteAction),
+                            //     )
+                            //     .separator()
+                            //     .menu_with_icon("Delete", IconName::Trash, Box::new(DeleteAction))
+                            // menu.menu_with_icon("Delete", IconName::Trash, Box::new(DeleteAction))
+                            menu.menu_element_with_icon(
+                                           // 图标不会跟着变色（render_icon 只给 .xsmall()，颜色是继承的），
+                                           // 要红就得自己设
+                                           Icon::new(IconName::Trash).text_color(danger),
+                                           Box::new(DeleteAction),
+                                           |_, cx| div().text_color(cx.theme().danger).child("Delete"),
+                                       )
+                        })
+                }
             )
     }
 
