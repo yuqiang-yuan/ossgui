@@ -4,32 +4,18 @@ use ali_oss_rs::{
     Client,
     bucket::BucketOperations,
     bucket_common::{ListObjectsOptionsBuilder, ListObjectsResult, ObjectSummary},
+    cname::CnameOperations,
     object::ObjectOperations,
     object_common::ObjectMetadata,
     presign_common::PresignGetOptionsBuilder,
 };
 use gpui_kit::{
-    App, AppContext, Context, Div, Entity, InteractiveElement, IntoElement, ParentElement,
-    PathPromptOptions, Render, Styled, StyledImage, Subscription, Task, TextAlign, WeakEntity,
-    Window,
-    assets::IconName,
-    base::{
+    App, AppContext, ClipboardItem, Context, Div, Entity, InteractiveElement, IntoElement, ParentElement, PathPromptOptions, Render, Styled, StyledImage, Subscription, Task, TextAlign, WeakEntity, Window, assets::IconName, base::{
         Disableable, IndexPath, Placement, StyledExt,
         input::{InputEvent, InputState},
-    },
-    component::{
-        ActiveTheme, Icon, Sizable, WindowExt,
-        button::{Button, ButtonVariant, ButtonVariants},
-        checkbox::Checkbox,
-        description_list::{DescriptionItem, DescriptionList},
-        input::Input,
-        menu::DropdownMenu,
-        notification::NotificationType,
-        progress::ProgressCircle,
-        select::{Select, SelectEvent, SelectState},
-        table::{Column, ColumnSort, DataTable, TableDelegate, TableState},
-    },
-    div, img, px,
+    }, component::{
+        ActiveTheme, Icon, Sizable, WindowExt, button::{Button, ButtonVariant, ButtonVariants}, checkbox::Checkbox, description_list::{DescriptionItem, DescriptionList}, input::Input, marker::{Marker, MarkerAlignment, MarkerContent, MarkerVariant}, menu::DropdownMenu, notification::NotificationType, progress::ProgressCircle, select::{Select, SelectEvent, SelectState}, table::{Column, ColumnSort, DataTable, TableDelegate, TableState},
+    }, div, img, px,
 };
 
 use crate::{
@@ -1378,9 +1364,7 @@ impl ObjectTableDelegate {
                     .movable(false),
                 // 行内操作列（跟 bucket view 的形制一致）。
                 // 两个按钮所以比 bucket view 那个 60 宽一点
-                Column::new("actions", "")
-                    .width(px(80.0))
-                    .movable(false),
+                Column::new("actions", "").width(px(80.0)).movable(false),
             ],
         }
     }
@@ -1785,6 +1769,8 @@ struct ObjectMetaPanel {
     load_state: LoadState,
     object_meta: Option<ObjectMetadata>,
     presigned_url: Option<String>,
+    domain_names_state: Entity<SelectState<Vec<String>>>,
+    sign_duration_state: Entity<InputState>,
 }
 
 impl ObjectMetaPanel {
@@ -1803,6 +1789,12 @@ impl ObjectMetaPanel {
             load_state: LoadState::Idle,
             object_meta: None,
             presigned_url: None,
+            domain_names_state: cx.new(|cx| SelectState::new(vec![], None, window, cx)),
+            sign_duration_state: cx.new(|cx| {
+                let mut state = InputState::new(window, cx);
+                state.set_value("3600", window, cx);
+                state
+            }),
         };
 
         cx.on_next_frame(window, |this, _, cx| {
@@ -1830,30 +1822,54 @@ impl ObjectMetaPanel {
             let object_key_clone = object_key.clone();
             let client_clone = client.clone();
 
-            let join = handle
-                .spawn(async move { client.head_object(&bucket_name, &object_key, None).await });
+            // 后续优化：可以缓存一下 bucket 的信息，不用每次都拉取了
+            let join = handle.spawn(async move {
+                let meta = client.head_object(&bucket_name, &object_key, None).await;
+                let cnames = client.list_cname(&bucket_name).await;
+                let bucket_info = client.get_bucket_info(bucket_name).await;
+                Ok::<_, ali_oss_rs::error::Error>((meta, cnames, bucket_info))
+            });
+
             let _abort_on_drop = AbortOnDrop(join.abort_handle());
 
             let result = match join.await {
-                Ok(Ok(meta)) => Ok(meta),
-                Ok(Err(e)) => Err(anyhow::anyhow!("{e}")),
+                Ok(Ok((Ok(meta), Ok(cnames), Ok(bucket_info)))) => Ok((meta, cnames, bucket_info)),
+                Ok(_) => Err(anyhow::anyhow!("call oss api failed")),
                 Err(join_err) => Err(anyhow::anyhow!("oss task failed: {join_err}")),
             };
 
             this.update_in(cx, |this, window, cx| {
                 match result {
-                    Ok(meta) => {
+                    Ok((meta, cnames, bucket_info)) => {
                         // println!("{:?}", meta);
                         this.presigned_url = Some(
                             client_clone.presign_url(
-                                bucket_name_clone,
-                                object_key_clone,
+                                &bucket_name_clone,
+                                &object_key_clone,
                                 PresignGetOptionsBuilder::default()
                                     .expires_seconds(120)
                                     .build(),
                             ),
                         );
                         this.object_meta = Some(meta);
+
+                        this.domain_names_state.update(cx, |state, cx| {
+                            let mut items = vec![
+                                format!("{}.{}", bucket_name_clone, bucket_info.extranet_endpoint),
+                                format!("{}.{}", bucket_name_clone, bucket_info.intranet_endpoint),
+                            ];
+
+                            items.extend(cnames.iter().map(|cname| cname.domain.clone()));
+
+                            if !items.is_empty() {
+                                state.set_selected_index(Some(IndexPath::new(0usize)), window, cx);
+                            } else {
+                                state.set_selected_index(None, window, cx);
+                            }
+
+                            state.set_items(items, window, cx);
+                        });
+
                         this.load_state = LoadState::Loaded;
                     }
                     Err(e) => {
@@ -1866,6 +1882,37 @@ impl ObjectMetaPanel {
             })
             .ok();
         });
+    }
+
+    /// 获取地址的时候选择的域名
+    fn render_domain_names(&self, cx: &mut Context<Self>) -> Div {
+        div()
+            .v_flex()
+            .gap_2()
+            .child(div().text_sm().child("Domain"))
+            .child(Select::new(&self.domain_names_state))
+            .child(div().text_sm().child("Duration seconds"))
+            .child(Input::new(&self.sign_duration_state))
+            .child(div().w_full().h_flex().items_center().justify_end().child(
+                Button::new("copy-url-button").label("Copy").on_click(cx.listener(|this, _, window, cx| {
+                    let Some(domain) = this.domain_names_state.read(cx).selected_value() else {
+                        window.push_notification((NotificationType::Error, "Please select a domain"), cx);
+                        return;
+                    };
+
+                    let s = this.sign_duration_state.read(cx).value();
+                    let Ok(n) = u32::from_str_radix(s.as_str(), 10) else {
+                        window.push_notification((NotificationType::Error, "Please input a valid duration number"), cx);
+                        return;
+                    };
+
+                    let url = this.ossclient.presign_url(&this.bucket_name, &this.object_key, PresignGetOptionsBuilder::new(n).build());
+                    let pos = &url[8..].find('/').unwrap_or_default();
+                    let url = format!("https://{}{}", domain, &url[pos + 8..]);
+                    cx.write_to_clipboard(ClipboardItem::new_string(url));
+                    window.push_notification((NotificationType::Info, "Url has been copied to clipboard"), cx);
+                }))
+            ))
     }
 
     fn render_detail(&self) -> Div {
@@ -1981,17 +2028,35 @@ impl Render for ObjectMetaPanel {
             .p_4()
             .child(
                 div()
-                    .text_sm()
-                    .text_color(cx.theme().secondary_foreground)
-                    .child("Preview"),
+                    .mb_4()
+                    .child(
+                        Marker::new()
+                            .with_variant(MarkerVariant::Separator)
+                            .alignment(MarkerAlignment::Center)
+                            .content(MarkerContent::new().text("Get url"))
+                    ),
+            )
+            .child(self.render_domain_names(cx))
+            .child(
+                div()
+                    .my_4()
+                    .child(
+                        Marker::new()
+                            .with_variant(MarkerVariant::Separator)
+                            .alignment(MarkerAlignment::Center)
+                            .content(MarkerContent::new().text("Preview"))
+                    ),
             )
             .child(self.render_preview(cx))
             .child(
                 div()
-                    .text_sm()
-                    .text_color(cx.theme().secondary_foreground)
-                    .mt_4()
-                    .child("Metadata"),
+                    .my_4()
+                    .child(
+                        Marker::new()
+                            .with_variant(MarkerVariant::Separator)
+                            .alignment(MarkerAlignment::Center)
+                            .content(MarkerContent::new().text("Metadata"))
+                    ),
             )
             .child(match self.load_state {
                 LoadState::Idle => div(),
