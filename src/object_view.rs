@@ -480,6 +480,7 @@ impl ObjectListPanel {
                         Button::new("breadcrumb-home-button")
                             .ghost()
                             .small()
+                            .compact()
                             .label("oss://")
                             .on_click(move |_, window, cx| {
                                 main_view
@@ -493,6 +494,7 @@ impl ObjectListPanel {
                         Button::new("breadcrumb-bucket-button")
                             .ghost()
                             .small()
+                            .compact()
                             .label(self.bucket_name.clone())
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.prefix = String::new();
@@ -526,6 +528,7 @@ impl ObjectListPanel {
                 Button::new(format!("breadcrumb-prefix-{}", acc))
                     .ghost()
                     .small()
+                    .compact()
                     .label(format!("/{p}"))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.prefix = prefix.clone();
@@ -854,7 +857,13 @@ impl ObjectListPanel {
         self.start_download(window, cx);
     }
 
-    /// 下载当前勾选的对象。
+    /// 下载当前勾选的对象（工具栏按钮和 DownloadAction 走这里）。
+    fn start_download(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (files, folders) = self.selected_files_and_folders(cx);
+        self.download_objects(files, folders, window, cx);
+    }
+
+    /// 下载指定的对象：工具栏传整批勾选，行内的下载按钮只传那一行。
     ///
     /// 目标位置的规则：
     /// - 只选了一个文件 → 弹"另存为"，可以顺手改名
@@ -864,8 +873,13 @@ impl ObjectListPanel {
     ///
     /// 跟上传不同，文件夹里的对象**必须在入队前**就列出来 ——
     /// 每个下载任务的落地路径是入队时定死的，执行器那边不认 key。
-    fn start_download(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (files, folders) = self.selected_files_and_folders(cx);
+    fn download_objects(
+        &mut self,
+        files: Vec<String>,
+        folders: Vec<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if files.is_empty() && folders.is_empty() {
             return;
         }
@@ -1362,6 +1376,11 @@ impl ObjectTableDelegate {
                 Column::new("storage_class", "Storage class")
                     .width(px(120.0))
                     .movable(false),
+                // 行内操作列（跟 bucket view 的形制一致）。
+                // 两个按钮所以比 bucket view 那个 60 宽一点
+                Column::new("actions", "")
+                    .width(px(80.0))
+                    .movable(false),
             ],
         }
     }
@@ -1675,6 +1694,73 @@ impl TableDelegate for ObjectTableDelegate {
             } else {
                 "-".to_string()
             }),
+            5 => {
+                let panel = self.object_list_panel.clone();
+                let key = key.to_string();
+
+                let download = {
+                    let panel = panel.clone();
+                    let key = key.clone();
+                    Button::new(format!("download-{key}-button"))
+                        .tooltip("Download")
+                        .icon(IconName::CloudDownload)
+                        .text()
+                        .rounded_full()
+                        .compact()
+                        .on_click(move |_, window, cx| {
+                            panel
+                                .update(cx, |panel, cx| {
+                                    // 文件夹行下的是整个目录，走跟工具栏一样的展开逻辑
+                                    if is_folder {
+                                        panel.download_objects(
+                                            Vec::new(),
+                                            vec![key.clone()],
+                                            window,
+                                            cx,
+                                        );
+                                    } else {
+                                        panel.download_objects(
+                                            vec![key.clone()],
+                                            Vec::new(),
+                                            window,
+                                            cx,
+                                        );
+                                    }
+                                })
+                                .ok();
+                        })
+                };
+
+                // 文件夹没有元数据可看，info 只给文件
+                let info = (!is_folder).then(|| {
+                    let panel = panel.clone();
+                    let key = key.clone();
+                    Button::new(format!("info-{key}-button"))
+                        .tooltip("Object detail")
+                        .icon(IconName::Info)
+                        .text()
+                        .rounded_full()
+                        .compact()
+                        .on_click(move |_, window, cx| {
+                            panel
+                                .update(cx, |panel, cx| {
+                                    panel.show_object_detail(key.clone(), window, cx)
+                                })
+                                .ok();
+                        })
+                });
+
+                // 左对齐：格子的左右内边距由表格自己给，所以按钮跟
+                // 上面 Name 那一列的文字是同一条竖线
+                div()
+                    .size_full()
+                    .h_flex()
+                    .gap_2()
+                    .items_center()
+                    .justify_start()
+                    .child(download)
+                    .children(info)
+            }
             _ => div(),
         }
     }
