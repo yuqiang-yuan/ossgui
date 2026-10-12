@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::OnceLock};
+use std::{collections::HashMap, path::PathBuf, sync::OnceLock};
 
 use chrono::{DateTime, Local};
 
@@ -123,4 +123,52 @@ pub fn file_name(s: &str) -> &str {
     };
 
     &s[pos +1..]
+}
+
+/// 把一个名字变成能落盘的文件名。
+///
+/// ali-oss-rs 的 `get_object_to_file` 会用一套 Windows 规则校验路径
+/// （`util::validate_file_name`）：含 `< > : " \ | ? *` 或者叫 `CON` / `NUL` /
+/// `COM1` 这类设备名一律拒绝，**在 Linux / macOS 上也一样**。
+/// OSS 的 key 是完全自由的，所以这里先把非法字符替掉 ——
+/// 否则一个叫 `2026:Q1.pdf` 的对象会直接下载失败。
+pub fn safe_file_name(name: &str) -> String {
+    const ILLEGAL: [char; 8] = ['<', '>', ':', '"', '\\', '|', '?', '*'];
+
+    // 跟 SDK 的名单保持一致（它比的是整个名字，所以 "CON.txt" 在它那儿是通过的）
+    const RESERVED: [&str; 22] = [
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7",
+        "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    ];
+
+    let mut out: String = name
+        .chars()
+        .map(|c| {
+            if ILLEGAL.contains(&c) || c == '\0' || c == '/' {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+
+    if RESERVED.contains(&out.as_str()) {
+        out.insert(0, '_');
+    }
+
+    if out.is_empty() {
+        out.push_str("download");
+    }
+
+    out
+}
+
+/// 把 object key 里的一段相对路径变成能落盘的 PathBuf，逐段清洗。
+///
+/// `.` 和 `..` 段直接丢掉：key 里出现 `../../` 时不能让文件写到目标目录外面去。
+pub fn safe_relative_path(rel: &str) -> PathBuf {
+    rel.split('/')
+        .filter(|segment| !segment.is_empty() && *segment != "." && *segment != "..")
+        .map(safe_file_name)
+        .collect()
 }

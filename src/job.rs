@@ -9,7 +9,7 @@
 
 use std::{
     collections::{HashMap, VecDeque},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -701,7 +701,7 @@ mod runner {
         multipart::MultipartUploadsOperations,
         multipart_common::{CompleteMultipartUploadRequest, UploadPartRequest},
         object::ObjectOperations,
-        object_common::{DeleteMultipleObjectsConfig, PutObjectOptionsBuilder},
+        object_common::{DeleteMultipleObjectsConfig, GetObjectOptionsBuilder, PutObjectOptionsBuilder},
     };
 
     use crate::common::tokio_runtime;
@@ -720,13 +720,7 @@ mod runner {
             let id = run.id;
             let outcome = match &run.kind {
                 JobKind::Upload { .. } => run_upload(&run, &tx, ctl).await,
-                JobKind::Download { .. } => {
-                    async {
-                        println!("download job");
-                        Ok(())
-                    }
-                    .await
-                }
+                JobKind::Download { .. } => run_download(&run, &tx, ctl).await,
                 JobKind::Delete { .. } => run_delete(&run, &tx, ctl).await,
                 JobKind::DeletePrefix { .. } => run_delete_prefix(&run, &tx, ctl).await,
             };
@@ -1141,6 +1135,138 @@ mod runner {
         }
 
         Ok(())
+    }
+
+    /// 下载单个对象到本地文件，进度单位是**字节**。
+    ///
+    /// `get_object_to_file` 自己从响应头取 Content-Length 当总量，回调给的
+    /// 就是整对象的进度；写盘是流式的，不会把文件整个读进内存。
+    ///
+    /// 半成品写在 `<目标名>.<job id>.part`，成功了才改名成最终名字 ——
+    /// 取消或者失败时盘上不会留下一个"看着完整其实半截"的文件。
+    /// 名字里带 job id 是因为同一个目录下可能并发下两个同名对象
+    /// （`a/x.txt` 和 `b/x.txt` 都落到 `x.txt`），它们的 .part 必须是两个文件，
+    /// 否则两个任务会往同一个文件里交错写。
+    async fn run_download(
+        run: &JobRun,
+        tx: &mpsc::UnboundedSender<JobEvent>,
+        mut ctl: watch::Receiver<JobSignal>,
+    ) -> Result<(), JobError> {
+        let JobKind::Download {
+            bucket_name,
+            object_key,
+            target,
+        } = &run.kind
+        else {
+            unreachable!()
+        };
+
+        let part = part_path(target, run.id);
+        let throttle = Arc::new(ProgressThrottle::new(tx.clone(), run.id));
+
+        // 起始报一次：这会儿还没拿到响应头，总量未知。面板会先显示成不确定态，
+        // 等第一个进度事件回来（那时已经有 Content-Length）再切成百分比
+        throttle.report_immediate(0, None, 0);
+
+        let options = GetObjectOptionsBuilder::new()
+            .progress({
+                let throttle = throttle.clone();
+                // 下载的进度单位就是字节，第三个参数直接给 done
+                move |done, total| throttle.report(done, total, done)
+            })
+            .build();
+
+        // 和上传一样：把请求本身放进 select!，取消时未完成的 future 被 drop = 断连。
+        //
+        // 注意分支体里**不能 await**：`wait_for` 返回的 Ref 会一直活到分支体结束，
+        // 带着它 await 会让整个 future 不是 Send，tokio::spawn 直接编译不过。
+        // 所以这里只把结果取出来，清理放到 select! 外面做。
+        let result = tokio::select! {
+            r = run.client.get_object_to_file(bucket_name, object_key, &part, Some(options)) => Some(r),
+            _ = ctl.wait_for(|s| *s == JobSignal::Cancel) => None,
+        };
+
+        let Some(result) = result else {
+            discard_part(&part).await;
+            return Err(JobError::Cancelled);
+        };
+
+        if let Err(e) = result {
+            discard_part(&part).await;
+            return Err(JobError::Failed(e.to_string()));
+        }
+
+        // 收尾：占住最终名字（重名就退让成 "名字 (1).ext"），再把 .part 改过去
+        let size = finalize_download(&part, target)
+            .await
+            .map_err(|e| JobError::Failed(e.to_string()))?;
+
+        // 限流可能吞掉最后一个 chunk，收尾补一次，保证进度条走满
+        throttle.report_immediate(size, Some(size), size);
+
+        Ok(())
+    }
+
+    /// 半成品的路径：`/dir/name.ext` → `/dir/name.ext.<job id>.part`
+    fn part_path(target: &Path, job_id: u64) -> PathBuf {
+        let mut name = target.as_os_str().to_os_string();
+        name.push(format!(".{job_id}.part"));
+        PathBuf::from(name)
+    }
+
+    /// 把 `.part` 收尾成最终文件，返回字节数。
+    ///
+    /// 目标名已经被占用时（用户自己有个同名文件，或者同一批里有两个同名对象）
+    /// 退让成 `名字 (1).ext`、`名字 (2).ext`。
+    async fn finalize_download(part: &Path, target: &Path) -> std::io::Result<u64> {
+        let size = tokio::fs::metadata(part).await?.len();
+        let path = reserve_path(target).await?;
+        tokio::fs::rename(part, &path).await?;
+        Ok(size)
+    }
+
+    /// 原子地占住一个还没被占用的路径。
+    ///
+    /// 用 `create_new`（O_CREAT | O_EXCL）而不是"先 exists() 判断再 rename"：
+    /// 后者在并发下两个任务会双双判断通过，然后 rename 互相覆盖。
+    /// 占位文件是空的，紧接着的 rename 会把它替换掉。
+    async fn reserve_path(target: &Path) -> std::io::Result<PathBuf> {
+        let mut n = 0u32;
+        loop {
+            let candidate = if n == 0 {
+                target.to_path_buf()
+            } else {
+                numbered_path(target, n)
+            };
+
+            match tokio::fs::File::create_new(&candidate).await {
+                Ok(_) => return Ok(candidate),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => n += 1,
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    /// `name.ext` + 2 → `name (2).ext`；没有扩展名就是 `name (2)`
+    fn numbered_path(target: &Path, n: u32) -> PathBuf {
+        let stem = target
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+
+        let name = match target.extension() {
+            Some(ext) => format!("{stem} ({n}).{}", ext.to_string_lossy()),
+            None => format!("{stem} ({n})"),
+        };
+
+        target.with_file_name(name)
+    }
+
+    /// 取消/失败时把半成品删掉。
+    /// 删不掉（目录被删了、没权限）也不该改变任务本身的结局，所以吞掉错误。
+    async fn discard_part(part: &Path) {
+        let _ = tokio::fs::remove_file(part).await;
     }
 }
 

@@ -9,6 +9,7 @@ actions!(
         CutAction,
         PasteAction,
         DeleteAction,
+        DownloadAction,
         OpenFilesForUploadAction,
         OpenFolderForUploadAction,
     ]

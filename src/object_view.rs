@@ -33,12 +33,10 @@ use gpui_kit::{
 };
 
 use crate::{
-    actions::{
-        CopyAction, CutAction, DeleteAction, OpenFilesForUploadAction, OpenFolderForUploadAction,
-        PasteAction,
-    },
+    actions::{DeleteAction, DownloadAction, OpenFilesForUploadAction, OpenFolderForUploadAction},
     common::{
-        AbortOnDrop, LoadState, format_datetime, format_file_size, oss_region_map, tokio_runtime,
+        AbortOnDrop, LoadState, file_name, format_datetime, format_file_size, oss_region_map,
+        safe_file_name, safe_relative_path, tokio_runtime,
     },
     job::{JobKind, JobQueue},
     main_view::MainView,
@@ -70,6 +68,12 @@ pub struct ObjectListPanel {
 
 /// 一次上传最多入队多少个文件。选中一个大目录时防止把队列和面板撑爆。
 const MAX_UPLOAD_FILES: usize = 5000;
+
+/// 一次下载最多展开多少个对象（下载文件夹时按这个截断）。
+const MAX_DOWNLOAD_FILES: usize = 5000;
+
+/// 列文件夹时每页拉多少个 key。1000 是 list_objects 允许的上限。
+const LIST_PAGE_SIZE: u32 = 1000;
 
 /// 任务结束后的刷新去抖窗口。
 /// 传一个文件夹可能有几千个任务陆续完成，不能每个都去拉一次列表。
@@ -146,10 +150,7 @@ fn scan_upload_paths(paths: Vec<PathBuf>) -> (Vec<UploadCandidate>, bool) {
                     // 先把借用用掉，下面才能把 child 移进 UploadCandidate。
                     // Windows 上 PathBuf 的分隔符是 '\'，这里统一成 OSS 的 '/'，
                     // 同时这个字符串也要拿去显示
-                    let relative = root_name
-                        .join(rel)
-                        .to_string_lossy()
-                        .replace('\\', "/");
+                    let relative = root_name.join(rel).to_string_lossy().replace('\\', "/");
 
                     out.push(UploadCandidate {
                         source: child,
@@ -462,7 +463,8 @@ impl ObjectListPanel {
                     .tooltip("Refresh")
                     .icon(IconName::RefreshCw)
                     .rounded_none()
-                    .border_0().on_click(cx.listener(|this, _, _, cx| {
+                    .border_0()
+                    .on_click(cx.listener(|this, _, _, cx| {
                         this.load_objects(cx);
                     })),
             )
@@ -573,7 +575,10 @@ impl ObjectListPanel {
             .child(
                 Button::new("download-button")
                     .icon(IconName::CloudDownload)
-                    .label("Download"),
+                    .label("Download")
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.start_download(window, cx);
+                    })),
             )
             .child(
                 Button::new("new-folder-button")
@@ -615,34 +620,32 @@ impl ObjectListPanel {
                         });
                     })),
             )
-            .child(
-                {
-                    let danger = cx.theme().danger;
+            .child({
+                let danger = cx.theme().danger;
 
-                    Button::new("more-button")
-                        .label("More")
-                        .dropdown_caret(true)
-                        .dropdown_menu(move |menu, _, _| {
-                            // menu.menu_with_icon("Copy", IconName::Copy, Box::new(CopyAction))
-                            //     .menu_with_icon("Cut", IconName::ClipboardX, Box::new(CutAction))
-                            //     .menu_with_icon(
-                            //         "Paste",
-                            //         IconName::ClipboardPaste,
-                            //         Box::new(PasteAction),
-                            //     )
-                            //     .separator()
-                            //     .menu_with_icon("Delete", IconName::Trash, Box::new(DeleteAction))
-                            // menu.menu_with_icon("Delete", IconName::Trash, Box::new(DeleteAction))
-                            menu.menu_element_with_icon(
-                                           // 图标不会跟着变色（render_icon 只给 .xsmall()，颜色是继承的），
-                                           // 要红就得自己设
-                                           Icon::new(IconName::Trash).text_color(danger),
-                                           Box::new(DeleteAction),
-                                           |_, cx| div().text_color(cx.theme().danger).child("Delete"),
-                                       )
-                        })
-                }
-            )
+                Button::new("more-button")
+                    .label("More")
+                    .dropdown_caret(true)
+                    .dropdown_menu(move |menu, _, _| {
+                        // menu.menu_with_icon("Copy", IconName::Copy, Box::new(CopyAction))
+                        //     .menu_with_icon("Cut", IconName::ClipboardX, Box::new(CutAction))
+                        //     .menu_with_icon(
+                        //         "Paste",
+                        //         IconName::ClipboardPaste,
+                        //         Box::new(PasteAction),
+                        //     )
+                        //     .separator()
+                        //     .menu_with_icon("Delete", IconName::Trash, Box::new(DeleteAction))
+                        // menu.menu_with_icon("Delete", IconName::Trash, Box::new(DeleteAction))
+                        menu.menu_element_with_icon(
+                            // 图标不会跟着变色（render_icon 只给 .xsmall()，颜色是继承的），
+                            // 要红就得自己设
+                            Icon::new(IconName::Trash).text_color(danger),
+                            Box::new(DeleteAction),
+                            |_, cx| div().text_color(cx.theme().danger).child("Delete"),
+                        )
+                    })
+            })
     }
 
     fn paginator_bar(&self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -721,10 +724,10 @@ impl ObjectListPanel {
     ///
     /// "能不能在一个对话框里既选文件又选目录"是**运行时**才知道的平台能力
     /// （`App::can_select_mixed_files_and_dirs`），别用 `#[cfg]` 猜：
-    /// - macOS  : NSOpenPanel 的 canChooseFiles / canChooseDirectories 可以同时为真
-    /// - Windows: FOS_PICKFOLDERS 是个模式开关，directories = true 就是纯文件夹
-    ///            选择器，files = true 会被无声吞掉
-    /// - Linux  : portal 的 OpenFileRequest 只看 directory 标志，files 被忽略
+    /// - macOS：NSOpenPanel 的 canChooseFiles / canChooseDirectories 可以同时为真
+    /// - Windows：FOS_PICKFOLDERS 是模式开关，directories = true 就是纯文件夹选择器，
+    ///   files = true 会被无声吞掉
+    /// - Linux：portal 的 OpenFileRequest 只看 directory 标志，files 被忽略
     fn select_files_for_upload(
         &mut self,
         folder_only: bool,
@@ -820,29 +823,298 @@ impl ObjectListPanel {
         .detach();
     }
 
+    /// 当前勾选的行，分成"文件 key"和"文件夹 prefix"两拨。
+    ///
+    /// 列表里文件夹是 `common_prefixes` 造出来的虚拟行，所以它跟文件是两种东西：
+    /// 删除、下载都得分开处理。
+    fn selected_files_and_folders(&self, cx: &App) -> (Vec<String>, Vec<String>) {
+        let delegate = self.objects_state.read(cx).delegate();
+        let mut files: Vec<String> = Vec::new();
+        let mut folders: Vec<String> = Vec::new();
+
+        for &ix in &delegate.selected_indexes {
+            let Some(row) = delegate.rows.get(ix) else {
+                continue;
+            };
+            match row {
+                OssObjectItem::File(_) => files.push(row.get_key().clone()),
+                OssObjectItem::Folder(prefix) => folders.push(prefix.clone()),
+            }
+        }
+
+        (files, folders)
+    }
+
+    fn on_download_action(
+        &mut self,
+        _: &DownloadAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.start_download(window, cx);
+    }
+
+    /// 下载当前勾选的对象。
+    ///
+    /// 目标位置的规则：
+    /// - 只选了一个文件 → 弹"另存为"，可以顺手改名
+    /// - 其他情况（多选，或者选中里有文件夹）→ 弹目录选择器：
+    ///   文件按名字落进去；文件夹先在本地建出同名目录，再按相对路径放文件
+    ///   （`photos/2026/a.jpg` → `<目标目录>/2026/a.jpg`）
+    ///
+    /// 跟上传不同，文件夹里的对象**必须在入队前**就列出来 ——
+    /// 每个下载任务的落地路径是入队时定死的，执行器那边不认 key。
+    fn start_download(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (files, folders) = self.selected_files_and_folders(cx);
+        if files.is_empty() && folders.is_empty() {
+            return;
+        }
+
+        let bucket_name = self.bucket_name.clone();
+        let client = self.ossclient.clone();
+        let main_view = self.main_view.clone();
+
+        // ── 单个文件：另存为 ──────────────────────────────────────────
+        if files.len() == 1 && folders.is_empty() {
+            let object_key = files[0].clone();
+            let suggested = safe_file_name(file_name(&object_key));
+
+            // 保存对话框必须要一个起始目录。没有"上次用过的目录"可记，给工作目录
+            let directory = std::env::current_dir().unwrap_or_default();
+            let picked = cx.prompt_for_new_path(&directory, Some(suggested.as_str()));
+
+            cx.spawn_in(window, async move |_, cx| {
+                let target = match picked.await {
+                    Ok(Ok(Some(path))) => path,
+                    Ok(Err(err)) => {
+                        cx.update(|window, cx| {
+                            window.push_notification(
+                                (
+                                    NotificationType::Error,
+                                    format!("Couldn't open the save dialog: {err}"),
+                                ),
+                                cx,
+                            );
+                        })
+                        .ok();
+                        return;
+                    }
+                    _ => return, // 用户取消
+                };
+
+                let kind = JobKind::Download {
+                    bucket_name,
+                    object_key,
+                    target,
+                };
+
+                cx.update(|window, cx| {
+                    main_view
+                        .update(cx, move |main_view, cx| {
+                            main_view.enqueue_jobs(vec![kind], window, cx)
+                        })
+                        .ok();
+                })
+                .ok();
+            })
+            .detach();
+
+            return;
+        }
+
+        // ── 多选 / 含文件夹：选目录 ───────────────────────────────────
+        let picked = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Download".into()),
+        });
+
+        let handle = tokio_runtime().handle().clone();
+
+        cx.spawn_in(window, async move |_, cx| {
+            let base = match picked.await {
+                Ok(Ok(Some(paths))) => match paths.into_iter().next() {
+                    Some(path) => path,
+                    None => return,
+                },
+                Ok(Err(err)) => {
+                    cx.update(|window, cx| {
+                        window.push_notification(
+                            (
+                                NotificationType::Error,
+                                format!("Couldn't open the picker: {err}"),
+                            ),
+                            cx,
+                        );
+                    })
+                    .ok();
+                    return;
+                }
+                _ => return, // 用户取消
+            };
+
+            // 直接选中的文件：落到目标目录里，文件名沿用 object 名
+            let mut kinds: Vec<JobKind> = files
+                .iter()
+                .map(|key| JobKind::Download {
+                    bucket_name: bucket_name.clone(),
+                    object_key: key.clone(),
+                    target: base.join(safe_file_name(file_name(key))),
+                })
+                .collect();
+
+            // 文件夹要先列出来。列表是网络 I/O，放 tokio runtime
+            if !folders.is_empty() {
+                let join = handle.spawn({
+                    let client = client.clone();
+                    let bucket_name = bucket_name.clone();
+                    let folders = folders.clone();
+
+                    async move {
+                        let mut out: Vec<(String, PathBuf)> = Vec::new();
+                        let mut truncated = false;
+
+                        'folders: for prefix in &folders {
+                            // 目录名取 prefix 的最后一段，跟"下载这个文件夹"的直觉一致
+                            let root = safe_file_name(
+                                prefix.trim_end_matches('/').rsplit('/').next().unwrap_or(""),
+                            );
+
+                            let mut token: Option<String> = None;
+                            loop {
+                                let mut options = ListObjectsOptionsBuilder::new()
+                                    .prefix(prefix.clone())
+                                    .max_keys(LIST_PAGE_SIZE);
+                                if let Some(t) = token.clone() {
+                                    options = options.continuation_token(t);
+                                }
+
+                                let page = client
+                                    .list_objects(&bucket_name, Some(options.build()))
+                                    .await
+                                    .map_err(|e| e.to_string())?;
+
+                                for object in &page.contents {
+                                    let Some(rel) = object.key.strip_prefix(prefix.as_str())
+                                    else {
+                                        continue;
+                                    };
+                                    // 目录标记对象（key 以 '/' 结尾）不是文件
+                                    if rel.is_empty() || rel.ends_with('/') {
+                                        continue;
+                                    }
+
+                                    if out.len() >= MAX_DOWNLOAD_FILES {
+                                        truncated = true;
+                                        break 'folders;
+                                    }
+
+                                    out.push((
+                                        object.key.clone(),
+                                        base.join(&root).join(safe_relative_path(rel)),
+                                    ));
+                                }
+
+                                let next = page.next_continuation_token.clone();
+                                // 防御：truncated 却没给游标的话会原地死循环
+                                if !page.is_truncated || next.is_none() {
+                                    break;
+                                }
+                                token = next;
+                            }
+                        }
+
+                        Ok::<_, String>((out, truncated))
+                    }
+                });
+
+                let _abort_on_drop = AbortOnDrop(join.abort_handle());
+
+                let (expanded, truncated) = match join.await {
+                    Ok(Ok(value)) => value,
+                    Ok(Err(err)) => {
+                        cx.update(|window, cx| {
+                            window.push_notification(
+                                (
+                                    NotificationType::Error,
+                                    format!("Couldn't list the folder: {err}"),
+                                ),
+                                cx,
+                            );
+                        })
+                        .ok();
+                        return;
+                    }
+                    Err(join_err) => {
+                        cx.update(|window, cx| {
+                            window.push_notification(
+                                (
+                                    NotificationType::Error,
+                                    format!("oss task failed: {join_err}"),
+                                ),
+                                cx,
+                            );
+                        })
+                        .ok();
+                        return;
+                    }
+                };
+
+                kinds.extend(expanded.into_iter().map(|(object_key, target)| {
+                    JobKind::Download {
+                        bucket_name: bucket_name.clone(),
+                        object_key,
+                        target,
+                    }
+                }));
+
+                if truncated {
+                    cx.update(|window, cx| {
+                        window.push_notification(
+                            (
+                                NotificationType::Warning,
+                                format!(
+                                    "Folder too large, only the first {MAX_DOWNLOAD_FILES} objects were queued"
+                                ),
+                            ),
+                            cx,
+                        );
+                    })
+                    .ok();
+                }
+            }
+
+            if kinds.is_empty() {
+                cx.update(|window, cx| {
+                    window.push_notification(
+                        (NotificationType::Warning, "Nothing to download"),
+                        cx,
+                    );
+                })
+                .ok();
+                return;
+            }
+
+            cx.update(|window, cx| {
+                main_view
+                    .update(cx, move |main_view, cx| {
+                        main_view.enqueue_jobs(kinds, window, cx)
+                    })
+                    .ok();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// 删除当前勾选的对象。
     ///
     /// 勾选里可能混着文件夹（`common_prefixes` 里的虚拟目录），
     /// 它们各自变成一个 `DeletePrefix` 任务（连同内容一起删），
     /// 文件则合成一个 `Delete` 任务（批量删，每 1000 个一批）。
     fn on_delete_action(&mut self, _: &DeleteAction, window: &mut Window, cx: &mut Context<Self>) {
-        let (files, folders) = {
-            let delegate = self.objects_state.read(cx).delegate();
-            let mut files: Vec<String> = Vec::new();
-            let mut folders: Vec<String> = Vec::new();
-
-            for &ix in &delegate.selected_indexes {
-                let Some(row) = delegate.rows.get(ix) else {
-                    continue;
-                };
-                match row {
-                    OssObjectItem::File(_) => files.push(row.get_key().clone()),
-                    OssObjectItem::Folder(prefix) => folders.push(prefix.clone()),
-                }
-            }
-
-            (files, folders)
-        };
+        let (files, folders) = self.selected_files_and_folders(cx);
 
         if files.is_empty() && folders.is_empty() {
             return;
@@ -943,6 +1215,7 @@ impl Render for ObjectListPanel {
         div()
             .on_action(cx.listener(Self::on_open_files_for_upload_action))
             .on_action(cx.listener(Self::on_open_folders_for_upload_action))
+            .on_action(cx.listener(Self::on_download_action))
             .on_action(cx.listener(Self::on_delete_action))
             .size_full()
             .v_flex()
