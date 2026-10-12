@@ -1,6 +1,10 @@
-use std::{collections::HashMap, path::PathBuf, sync::OnceLock};
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    sync::OnceLock,
+};
 
-use chrono::{DateTime, Local};
+use chrono::{DateTime, Local, Utc};
 
 pub fn tokio_runtime() -> &'static tokio::runtime::Runtime {
     static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
@@ -34,10 +38,7 @@ impl Drop for AbortOnDrop {
 #[allow(dead_code)]
 pub fn format_date(raw: &str) -> String {
     match DateTime::parse_from_rfc3339(raw) {
-        Ok(dt) => dt
-            .with_timezone(&Local)
-            .format("%Y-%m-%d")
-            .to_string(),
+        Ok(dt) => dt.with_timezone(&Local).format("%Y-%m-%d").to_string(),
         Err(_) => raw.to_string(), // 解析失败原样显示，别 panic
     }
 }
@@ -45,11 +46,13 @@ pub fn format_date(raw: &str) -> String {
 /// - RFC 3339：`2015-04-29T02:44:22.000Z`（bucket 的 creation_date）
 /// - RFC 2822：`Tue, 18 Feb 2025 15:03:23 GMT`（object 的 last_modified / HTTP 头）
 pub fn format_datetime(raw: &str) -> String {
-    let parsed = DateTime::parse_from_rfc3339(raw)
-        .or_else(|_| DateTime::parse_from_rfc2822(raw));
+    let parsed = DateTime::parse_from_rfc3339(raw).or_else(|_| DateTime::parse_from_rfc2822(raw));
 
     match parsed {
-        Ok(dt) => dt.with_timezone(&Local).format("%Y-%m-%d %H:%M:%S").to_string(),
+        Ok(dt) => dt
+            .with_timezone(&Local)
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string(),
         Err(_) => raw.to_string(),
     }
 }
@@ -108,9 +111,15 @@ pub fn oss_region_map() -> &'static HashMap<&'static str, &'static str> {
             ("eu-west-2", "oss-eu-west-2.aliyuncs.com"),
             ("me-east-1", "oss-me-east-1.aliyuncs.com"),
             ("cn-hangzhou-finance", "oss-cn-hzfinance.aliyuncs.com"),
-            ("cn-shanghai-finance-1", "oss-cn-shanghai-finance-1-pub.aliyuncs.com"),
+            (
+                "cn-shanghai-finance-1",
+                "oss-cn-shanghai-finance-1-pub.aliyuncs.com",
+            ),
             ("cn-shenzhen-finance-1", "oss-cn-szfinance.aliyuncs.com"),
-            ("cn-beijing-finance-1", "oss-cn-beijing-finance-1-pub.aliyuncs.com"),
+            (
+                "cn-beijing-finance-1",
+                "oss-cn-beijing-finance-1-pub.aliyuncs.com",
+            ),
             ("cn-north-2-gov-1", "oss-cn-north-2-gov-1.aliyuncs.com"),
         ])
     })
@@ -122,7 +131,7 @@ pub fn file_name(s: &str) -> &str {
         return s;
     };
 
-    &s[pos +1..]
+    &s[pos + 1..]
 }
 
 /// 把一个名字变成能落盘的文件名。
@@ -137,8 +146,8 @@ pub fn safe_file_name(name: &str) -> String {
 
     // 跟 SDK 的名单保持一致（它比的是整个名字，所以 "CON.txt" 在它那儿是通过的）
     const RESERVED: [&str; 22] = [
-        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7",
-        "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+        "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
     ];
 
     let mut out: String = name
@@ -171,4 +180,9 @@ pub fn safe_relative_path(rel: &str) -> PathBuf {
         .filter(|segment| !segment.is_empty() && *segment != "." && *segment != "..")
         .map(safe_file_name)
         .collect()
+}
+
+/// Get current time ms
+pub fn current_timestamp_ms() -> i64 {
+    Utc::now().timestamp_millis()
 }

@@ -16,7 +16,8 @@ gpui_kit::assets::icon_assets!(
         ArrowUpDown,
         TicketX,
         CircleSlash2,
-        X
+        X,
+        CircleEllipsis
     ]
 );
 

@@ -8,8 +8,7 @@ use gpui_kit::{
     assets::IconName,
     base::{Placement, StyledExt, resizable_panel},
     component::{
-        ActiveTheme, Sizable, Theme, ThemeMode, TitleBar,
-        WindowExt,
+        ActiveTheme, Sizable, Theme, ThemeMode, TitleBar, WindowExt,
         button::{Button, ButtonVariant, ButtonVariants},
         h_resizable,
         menu::{AppMenuBar, DropdownMenu, PopupMenuItem},
@@ -21,16 +20,12 @@ use gpui_kit::{
 };
 
 use crate::{
-    actions::{AboutAction, QuitAction},
-    bucket_view::BucketListPanel,
-    common::format_file_size,
-    job::{JobKind, JobPanel, JobQueue, JobsSummary, TransferSpeed},
-    object_view::ObjectListPanel,
-    settings::AppSettings,
+    account::{AccountPanel, AccountSettings}, actions::{AboutAction, QuitAction}, bucket_view::BucketListPanel, common::format_file_size, job::{JobKind, JobPanel, JobQueue, JobsSummary, TransferSpeed}, object_view::ObjectListPanel, settings::AppSettings,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Scene {
+    Accounts,
     Buckets,
     Objects,
 }
@@ -39,6 +34,7 @@ pub struct MainView {
     focus_handle: FocusHandle,
     menubar: Entity<AppMenuBar>,
     show_fps: bool,
+    account_panel: Entity<AccountPanel>,
     bucket_list_panel: Entity<BucketListPanel>,
     object_list_panel: Option<Entity<ObjectListPanel>>,
     bucket_name: Option<String>,
@@ -71,6 +67,13 @@ impl MainView {
             let menus = build_menus().into_iter().map(|menu| menu.owned()).collect();
             GlobalState::global_mut(cx).set_app_menus(menus);
         }
+
+        let account_settings = AccountSettings::load();
+        let default_account = if !account_settings.accounts.is_empty() && let Some(last_id) = &account_settings.last_used {
+            account_settings.accounts.iter().find(|a| a.get_id() == last_id)
+        } else {
+            None
+        };
 
         let ossclient = Arc::new(Client::from_env());
         let this_weak = cx.weak_entity();
@@ -119,11 +122,12 @@ impl MainView {
             focus_handle,
             menubar: AppMenuBar::new(cx),
             show_fps: false,
+            account_panel: cx.new(|cx| AccountPanel::new(this_weak.clone(), window, cx)),
             bucket_list_panel: cx
                 .new(|cx| BucketListPanel::new(this_weak.clone(), ossclient.clone(), window, cx)),
             object_list_panel: None,
             bucket_name: None,
-            scene: Scene::Buckets,
+            scene: if default_account.is_some() { Scene::Accounts } else { Scene::Accounts },
             job_queue,
             job_panel,
             ossclient,
@@ -315,14 +319,14 @@ impl Render for MainView {
                         }
                     })
                     .child(
-                    div()
-                        .size_full()
-                        .h_flex()
-                        .child(self.menubar.clone())
-                        .child(div().flex_grow_1())
-                        .child(font_size_button())
-                        .child(theme_button(cx)),
-                ),
+                        div()
+                            .size_full()
+                            .h_flex()
+                            .child(self.menubar.clone())
+                            .child(div().flex_grow_1())
+                            .child(font_size_button())
+                            .child(theme_button(cx)),
+                    ),
             )
             .child(
                 div()
@@ -345,6 +349,11 @@ impl Render for MainView {
                                     div()
                                         .min_w_0()
                                         .size_full()
+                                        .when(matches!(self.scene, Scene::Accounts), |d| {
+                                            d.size_full().h_flex().items_start().justify_center().child(
+                                                div().w_128().h_full().child(self.account_panel.clone()),
+                                            )
+                                        })
                                         .when(matches!(self.scene, Scene::Buckets), |div| {
                                             div.p_2().child(self.bucket_list_panel.clone())
                                         })
