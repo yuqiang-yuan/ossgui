@@ -15,7 +15,7 @@ jobs:
     name: Linux x64 (deb / rpm / AppImage)
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -51,7 +51,7 @@ jobs:
       - name: 打包 rpm
         run: cargo generate-rpm -o dist
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: linux-x64
           path: |
@@ -64,7 +64,7 @@ jobs:
     name: Linux arm64 (deb / rpm / AppImage)
     runs-on: ubuntu-22.04-arm
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -100,7 +100,7 @@ jobs:
       - name: 打包 rpm
         run: cargo generate-rpm -o dist
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: linux-arm64
           path: |
@@ -114,7 +114,7 @@ jobs:
     # macos-14 起都是 Apple Silicon
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -136,7 +136,7 @@ jobs:
       - name: 打包 dmg
         run: cargo packager --release --formats dmg
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: macos-arm64
           path: dist/*.dmg
@@ -146,7 +146,7 @@ jobs:
     name: Windows x64 (免安装 exe)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -164,7 +164,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Copy-Item target/release/ossgui.exe dist/
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: windows-x64
           path: dist/*.exe
