@@ -31,13 +31,6 @@ Prebuilt packages come from the [Package](.github/workflows/package.yml) workflo
 | Windows | `ossgui.exe` — portable, just run it | x64 |
 | Linux | `.deb` / `.rpm` / `.AppImage` | x64 and arm64 |
 
-### macOS: the app is not signed
-
-The dmg is neither signed nor notarized, so Gatekeeper will refuse the first launch. Either **right-click the app → Open** and confirm, or clear the quarantine flag:
-
-```sh
-xattr -cr /Applications/Ossgui.app
-```
 
 ## Packaging
 

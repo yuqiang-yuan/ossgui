@@ -31,14 +31,6 @@
 | Windows | `ossgui.exe`，免安装，双击就能跑 | x64 |
 | Linux | `.deb` / `.rpm` / `.AppImage` | x64 和 arm64 |
 
-### macOS：没有签名
-
-dmg 既没签名也没公证，所以 Gatekeeper 会拦住第一次打开。**右键点应用 → 打开**并确认，或者清掉隔离标记：
-
-```sh
-xattr -cr /Applications/Ossgui.app
-```
-
 ## 打包
 
 用到两个工具：
