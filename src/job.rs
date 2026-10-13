@@ -78,7 +78,7 @@ fn part_size_for(total: u64) -> u64 {
 const PAGE_SIZE: u32 = 1000;
 
 /// 同时运行的任务数上限。跟 tokio worker 数无关，这些任务全是 I/O await
-const DEFAULT_MAX_CONCURRENCY: usize = 2;
+const DEFAULT_MAX_CONCURRENCY: usize = 10;
 
 /// 面板上保留的终态任务条数上限，超出从最旧的开始丢
 const MAX_FINISHED_JOBS: usize = 200;
