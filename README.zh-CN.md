@@ -51,6 +51,11 @@ Windows 两个都不用：免安装版就是 `target/release/ossgui.exe` 本身�
 本地构建（Linux）：
 
 ```sh
+# GPUI 链接期需要这些库。干净的机器上通常只有运行时（libxkbcommon0 这种）
+# 而没有 -dev 包，链接会报 "cannot find -lxkbcommon"。
+sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev \
+                        libfontconfig1-dev libfreetype6-dev
+
 cargo install cargo-packager cargo-generate-rpm --locked
 cargo packager --release --formats deb,appimage
 cargo generate-rpm -o dist

@@ -51,6 +51,12 @@ Windows uses neither: the portable exe *is* `target/release/ossgui.exe`. `build.
 To build locally (Linux):
 
 ```sh
+# GPUI links against these at build time. A clean machine usually has the
+# runtime libraries but not the -dev packages, and linking fails with
+# "cannot find -lxkbcommon".
+sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev \
+                        libfontconfig1-dev libfreetype6-dev
+
 cargo install cargo-packager cargo-generate-rpm --locked
 cargo packager --release --formats deb,appimage
 cargo generate-rpm -o dist

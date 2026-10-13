@@ -20,10 +20,21 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
-      # linuxdeploy 是 AppImage 形式分发的，挂载需要 FUSE
-      - name: 安装 AppImage 依赖
+      - name: 安装系统依赖
         run: |
           sudo apt-get update
+
+          # GPUI 在 Linux 上要链接这几个库。runner 镜像里带了运行时（libxkbcommon0
+          # 这种）但没带 -dev 包，缺的是 .so 软链接，链接期会报
+          # "cannot find -lxkbcommon"。本机开发时因为装过开发包所以不会遇到。
+          sudo apt-get install -y \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            libxcb1-dev \
+            libfontconfig1-dev \
+            libfreetype6-dev
+
+          # linuxdeploy 是 AppImage 形式分发的，挂载需要 FUSE
           sudo apt-get install -y libfuse2
 
       - name: 安装打包工具
@@ -58,9 +69,21 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
-      - name: 安装 AppImage 依赖
+      - name: 安装系统依赖
         run: |
           sudo apt-get update
+
+          # GPUI 在 Linux 上要链接这几个库。runner 镜像里带了运行时（libxkbcommon0
+          # 这种）但没带 -dev 包，缺的是 .so 软链接，链接期会报
+          # "cannot find -lxkbcommon"。本机开发时因为装过开发包所以不会遇到。
+          sudo apt-get install -y \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            libxcb1-dev \
+            libfontconfig1-dev \
+            libfreetype6-dev
+
+          # linuxdeploy 是 AppImage 形式分发的，挂载需要 FUSE
           sudo apt-get install -y libfuse2
 
       - name: 安装打包工具
