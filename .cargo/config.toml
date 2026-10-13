@@ -1,0 +1,6 @@
+# Windows 免安装单文件的关键：
+# MSVC 工具链默认**动态**链接 VC++ 运行库（vcruntime140.dll 等），
+# 用户没装 VC++ Redistributable 就会报缺 DLL。
+# +crt-static 把 CRT 静态链进 exe，双击即可运行。
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

@@ -20,7 +20,7 @@ use reqwest_client::ReqwestClient;
 
 use crate::{
     assets::AppAssets,
-    globals::{APP_ID, APP_NAME},
+    globals::{APP_DESKTOP_ID, APP_ID, APP_NAME},
     main_view::MainView,
     settings::AppSettings,
 };
@@ -122,6 +122,12 @@ fn main() {
                         Some(bounds)
                     },
                     kind: WindowKind::Normal,
+
+                    // 桌面环境靠这个把窗口和 ossgui.desktop 关联起来。
+                    // 注意 cx.set_app_identity() 在 Linux 上是被忽略的
+                    // （gpui-pre-linux 只拿它的 name 去做系统通知），
+                    // 真正生效的是这个字段。
+                    app_id: Some(APP_DESKTOP_ID.to_string()),
 
                     #[cfg(target_os = "linux")]
                     window_decorations: Some(WindowDecorations::Client),

@@ -2,9 +2,19 @@
 name = "ossgui"
 version = "0.1.0"
 edition = "2024"
+description = "Aliyun OSS desktop client built with GPUI"
+license = "MIT"
+authors = ["Yuan YQ <yuqiang.yuan@163.com>"]
+repository = "https://github.com/yuqiang-yuan/ossgui"
+homepage = "https://github.com/yuqiang-yuan/ossgui"
+readme = "README.md"
+keywords = ["oss", "aliyun", "gui", "gpui"]
+categories = ["gui"]
 
 [dependencies]
-ali-oss-rs = "0.3.1"
+# rust-tls 而不是默认的 native-tls：native-tls 会动态链接 libssl/libcrypto，
+# 把 deb/rpm 的最低发行版钉死在 OpenSSL 3。换掉之后运行时只剩 X11/glibc。
+ali-oss-rs = { version = "0.3.1", default-features = false, features = ["async", "rust-tls"] }
 anyhow = "1.0.104"
 chrono = "0.4.45"
 dirs = "7.0.0"
@@ -18,5 +28,84 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 tokio = { version = "1.53.1", features = ["full"] }
 
+# Windows 免安装单文件：把图标和版本信息嵌进 exe
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
+# deb / AppImage / dmg 的打包配置。
+#
+# 放在 Cargo.toml 里而不是独立的 Packager.toml，是因为版本号：
+# 只有从 package.metadata 读配置时 cargo-packager 才会用 package.version
+# 回填 version 字段，独立配置文件走不到那段逻辑，打出来的 deb 里
+# Version 是空的（Debian 规定这是非法字段）。
+#
+# formats 不在这里写：一份列表管不了三个平台，CI 里按平台用 --formats 指定。
+[package.metadata.packager]
+name = "ossgui"
+productName = "Ossgui"
+identifier = "app.ossgui"
+category = "Utility"
+description = "Aliyun OSS desktop client built with GPUI"
+longDescription = "A cross-platform Aliyun OSS client: browse buckets and objects, upload and download files, and manage multiple accounts with credentials kept in the OS keychain."
+copyright = "Copyright (c) 2026 Yuan YQ"
+licenseFile = "LICENSE"
+homepage = "https://github.com/yuqiang-yuan/ossgui"
+outDir = "dist"
+# binariesDir 必须显式写：它默认等于 outDir，不写的话会跑去 dist/ 里找二进制。
+# 路径不带 target triple —— CI 都是原生构建，产物在 target/release/。
+binariesDir = "target/release"
+binaries = [{ path = "ossgui", main = true }]
+beforePackagingCommand = "cargo build --release"
+icons = [
+    "packaging/icons/32x32.png",
+    "packaging/icons/128x128.png",
+    "packaging/icons/256x256.png",
+    "packaging/icons/512x512.png",
+    "packaging/icons/icon.ico",
+    "packaging/icons/icon.icns",
+]
+
+[package.metadata.packager.deb]
+section = "utils"
+priority = "optional"
+# packaging/ossgui.desktop 同时给 deb（这里当模板用，里面没有 Handlebars
+# 变量所以是原样拷贝）和 RPM（generate-rpm 的 assets 直接引用）用。
+# 不用 cargo-packager 默认模板是因为它生成的桌面项没有 StartupWMClass，
+# X11 下窗口和桌面项的关联会不稳。
+desktopTemplate = "packaging/ossgui.desktop"
+# 按 ldd 的实际结果列的（换掉 native-tls 之后没有 libssl 了）。
+# 包名是从本机 dpkg -S 查出来的，不是猜的。
+depends = [
+    "libc6",
+    "libgcc-s1",
+    "libxcb1",
+    "libxkbcommon0",
+    "libxkbcommon-x11-0",
+    "libxau6",
+    "libxdmcp6",
+]
+
+# RPM 用 cargo-generate-rpm（cargo-packager 0.11.8 不支持 RPM）
+[package.metadata.generate-rpm]
+name = "ossgui"
+summary = "Aliyun OSS desktop client built with GPUI"
+license = "MIT"
+url = "https://github.com/yuqiang-yuan/ossgui"
+vendor = "Yuan YQ"
+# 让工具直接读 ELF 生成 libxcb.so.1()(64bit) 这类依赖，不用手写 soname
+auto-req = "builtin"
+# cargo-generate-rpm 默认会给每个包加上 /bin/sh，因为它假定包里带 scriptlet。
+# 我们这个包没有任何 scriptlet（header 里没有 PREIN/POSTIN 等标签），
+# 所以这条依赖是多余的。
+require-sh = false
+assets = [
+    { source = "target/release/ossgui", dest = "/usr/bin/ossgui", mode = "755" },
+    { source = "packaging/icons/32x32.png", dest = "/usr/share/icons/hicolor/32x32/apps/ossgui.png", mode = "644" },
+    { source = "packaging/icons/128x128.png", dest = "/usr/share/icons/hicolor/128x128/apps/ossgui.png", mode = "644" },
+    { source = "packaging/icons/256x256.png", dest = "/usr/share/icons/hicolor/256x256/apps/ossgui.png", mode = "644" },
+    { source = "packaging/icons/512x512.png", dest = "/usr/share/icons/hicolor/512x512/apps/ossgui.png", mode = "644" },
+    { source = "packaging/ossgui.desktop", dest = "/usr/share/applications/ossgui.desktop", mode = "644" },
+]
+
 [profile.release]
-strip = "symbols"
+# strip = "symbols"

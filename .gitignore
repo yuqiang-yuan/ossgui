@@ -1,2 +1,8 @@
 /target
+
+# 打包产物（cargo-packager / cargo-generate-rpm 的输出目录）
+/dist
+
+# 旧版本用 .env 存 AK/SK，现在账号和密钥都走钥匙串了。
+# 留着这条是为了防止误提交历史遗留的密钥文件。
 .env

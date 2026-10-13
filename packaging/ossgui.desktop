@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Ossgui
+Comment=Aliyun OSS desktop client
+Exec=ossgui
+Icon=ossgui
+Terminal=false
+Categories=Utility;FileManager;
+Keywords=oss;aliyun;storage;object;
+StartupWMClass=ossgui
