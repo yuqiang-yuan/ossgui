@@ -12,7 +12,7 @@ mod account;
 #[cfg(target_os = "linux")]
 use gpui_kit::WindowDecorations;
 use gpui_kit::{
-    AppContext, WindowBounds, WindowKind, WindowOptions,
+    App, AppContext, WindowBounds, WindowKind, WindowOptions,
     component::{Theme, ThemeMode, ThemeRegistry, TitleBar},
     px, size,
 };
@@ -30,6 +30,12 @@ fn main() {
     let app = gpui_kit::application()
         .with_assets(AppAssets)
         .with_http_client(std::sync::Arc::new(ReqwestClient::new()));
+
+    // macOS 上关掉窗口后应用还活着（Dock 图标还在），点 Dock 图标时
+    // 系统回调 applicationShouldHandleReopen:，GPUI 转成这个 on_reopen。
+    // 它只在"一个窗口都没有"时触发，所以不会和已有窗口打架。
+    app.on_reopen(open_main_window);
+
     app.run(|cx| {
         gpui_kit::init(cx);
         cx.set_app_identity(APP_ID, APP_NAME);
@@ -103,45 +109,60 @@ fn main() {
         .detach();
 
         cx.spawn(async move |cx| {
-            cx.update(move |cx| {
-                let is_max = settings.window_maximized.unwrap_or(false);
-
-                // TODO: Test if the window bounds over the screen's bounds.
-                let bounds = WindowBounds::centered(
-                    size(
-                        px(settings.window_width.unwrap_or(1200.0)),
-                        px(settings.window_height.unwrap_or(800.0)),
-                    ),
-                    cx,
-                );
-
-                let options = WindowOptions {
-                    window_bounds: if is_max {
-                        Some(WindowBounds::Maximized(bounds.get_bounds()))
-                    } else {
-                        Some(bounds)
-                    },
-                    kind: WindowKind::Normal,
-
-                    // 桌面环境靠这个把窗口和 ossgui.desktop 关联起来。
-                    // 注意 cx.set_app_identity() 在 Linux 上是被忽略的
-                    // （gpui-pre-linux 只拿它的 name 去做系统通知），
-                    // 真正生效的是这个字段。
-                    app_id: Some(APP_DESKTOP_ID.to_string()),
-
-                    #[cfg(target_os = "linux")]
-                    window_decorations: Some(WindowDecorations::Client),
-                    ..TitleBar::window_options()
-                };
-
-                let (_, _) = gpui_kit::open_window(options, cx, |window, cx| {
-                    cx.new(|cx| MainView::new(window, cx))
-                })
-                .expect("Launch application failed");
-
-                cx.activate(true);
-            });
+            cx.update(open_main_window);
         })
         .detach();
     });
+}
+
+/// 打开主窗口。
+///
+/// macOS 上点关闭按钮只是把窗口移除，应用本身不退出（系统惯例，退出走 ⌘Q）。
+/// 用户再点 Dock 图标时 GPUI 会回调 [`Application::on_reopen`]，那里也走这个
+/// 函数把窗口重新开出来 —— 所以窗口的创建逻辑必须能重复执行。
+fn open_main_window(cx: &mut App) {
+    // on_reopen 本身只在"一个窗口都没有"时才触发，这里再兜一层，
+    // 免得以后加了别的入口意外开出第二个窗口。
+    if !cx.windows().is_empty() {
+        cx.activate(true);
+        return;
+    }
+
+    let settings = *cx.global::<AppSettings>();
+    let is_max = settings.window_maximized.unwrap_or(false);
+
+    // TODO: Test if the window bounds over the screen's bounds.
+    let bounds = WindowBounds::centered(
+        size(
+            px(settings.window_width.unwrap_or(1200.0)),
+            px(settings.window_height.unwrap_or(800.0)),
+        ),
+        cx,
+    );
+
+    let options = WindowOptions {
+        window_bounds: if is_max {
+            Some(WindowBounds::Maximized(bounds.get_bounds()))
+        } else {
+            Some(bounds)
+        },
+        kind: WindowKind::Normal,
+
+        // 桌面环境靠这个把窗口和 ossgui.desktop 关联起来。
+        // 注意 cx.set_app_identity() 在 Linux 上是被忽略的
+        // （gpui-pre-linux 只拿它的 name 去做系统通知），
+        // 真正生效的是这个字段。
+        app_id: Some(APP_DESKTOP_ID.to_string()),
+
+        #[cfg(target_os = "linux")]
+        window_decorations: Some(WindowDecorations::Client),
+        ..TitleBar::window_options()
+    };
+
+    let (_, _) = gpui_kit::open_window(options, cx, |window, cx| {
+        cx.new(|cx| MainView::new(window, cx))
+    })
+    .expect("Launch application failed");
+
+    cx.activate(true);
 }
