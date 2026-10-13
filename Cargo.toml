@@ -65,6 +65,19 @@ icons = [
     "packaging/icons/icon.icns",
 ]
 
+# macOS 签名身份。填你 "Developer ID Application" 证书的完整 Common Name：
+# 在本机跑 `security find-identity -v -p codesigning`，抄 "Developer ID
+# Application: 组织名 (TEAMID)" 那一整行（含括号里的 10 位 Team ID）。
+#
+# 这个名字不是机密——签完名的 app 用 `codesign -dvv` 谁都能看到，Tauri
+# 项目也是把签名身份明文写在配置里的。cargo-packager 拿它调 codesign 给
+# .app 签上 hardened runtime（公证必需）+ 时间戳。
+#
+# 本地 `cargo build` / `cargo run` 完全不受影响，只有 `cargo packager`
+# 会签名；本机 keychain 里有这张证书就能在本地出带签名的 dmg。
+[package.metadata.packager.macos]
+signingIdentity = "Developer ID Application: (VLB3FPR7W9)"
+
 [package.metadata.packager.deb]
 section = "utils"
 priority = "optional"
