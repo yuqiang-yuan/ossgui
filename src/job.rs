@@ -660,7 +660,7 @@ impl JobQueue {
         }
 
         match job.state {
-            JobState::Queued { .. } => {
+            JobState::Queued => {
                 self.queue_order.retain(|q| *q != id);
                 self.set_state(id, JobState::Cancelled);
             }

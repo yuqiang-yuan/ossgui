@@ -235,9 +235,7 @@ impl AccountPanel {
 
         let account_list_delegate = AccountListDelegate::new(account_settings.clone(), this_weak);
 
-        let mut regions = oss_region_map()
-            .iter()
-            .map(|(k, _)| k.to_string())
+        let mut regions = oss_region_map().keys().map(|k| k.to_string())
             .collect::<Vec<_>>();
         regions.sort();
 

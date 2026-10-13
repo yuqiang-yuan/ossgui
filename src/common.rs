@@ -4,7 +4,7 @@ use std::{
     sync::OnceLock,
 };
 
-use chrono::{DateTime, Local, Utc};
+use chrono::{DateTime, Local};
 
 pub fn tokio_runtime() -> &'static tokio::runtime::Runtime {
     static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
@@ -182,7 +182,7 @@ pub fn safe_relative_path(rel: &str) -> PathBuf {
         .collect()
 }
 
-/// Get current time ms
-pub fn current_timestamp_ms() -> i64 {
-    Utc::now().timestamp_millis()
-}
+// Get current time ms
+// pub fn current_timestamp_ms() -> i64 {
+//     Utc::now().timestamp_millis()
+// }

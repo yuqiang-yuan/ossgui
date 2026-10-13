@@ -19,8 +19,8 @@ impl Global for AppSettings {}
 impl AppSettings {
     /// Save settings. if save failed, just ignored
     pub fn save(&self) {
-        if let Ok(s) = serde_json::to_string(self) {
-            if let Some(p) = dirs::config_local_dir() {
+        if let Ok(s) = serde_json::to_string(self)
+            && let Some(p) = dirs::config_local_dir() {
                 let output_file_path = p.join(APP_ID);
                 if (!output_file_path.exists() && fs::create_dir(&output_file_path).is_ok())
                     || (output_file_path.exists())
@@ -29,7 +29,6 @@ impl AppSettings {
                     let _ = fs::write(output_file, s);
                 }
             }
-        }
     }
 
     // Load settings. if load failed, return the default

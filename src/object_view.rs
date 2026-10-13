@@ -179,14 +179,11 @@ impl ObjectListPanel {
         let search_sub =
             cx.subscribe(
                 &search_state,
-                |this, state, event: &InputEvent, cx| match event {
-                    InputEvent::Change => {
-                        let s = state.read(cx).value();
-                        this.objects_state.update(cx, |state, _| {
-                            state.delegate_mut().apply_filter(&s);
-                        });
-                    }
-                    _ => {}
+                |this, state, event: &InputEvent, cx| if let InputEvent::Change = event {
+                    let s = state.read(cx).value();
+                    this.objects_state.update(cx, |state, _| {
+                        state.delegate_mut().apply_filter(&s);
+                    });
                 },
             );
 
@@ -367,7 +364,7 @@ impl ObjectListPanel {
                                 contents
                                     .into_iter()
                                     .filter(|o| o.key != prefix)
-                                    .map(|s| OssObjectItem::File(s)),
+                                    .map(OssObjectItem::File),
                             );
 
                             if silent {
@@ -1418,8 +1415,7 @@ impl ObjectTableDelegate {
     fn row(&self, ix: usize) -> Option<&OssObjectItem> {
         self.filtered_indexes
             .get(ix)
-            .map(|ix| self.rows.get(*ix))
-            .flatten()
+            .and_then(|ix| self.rows.get(*ix))
     }
 
     fn recompute(&mut self) {
@@ -1486,7 +1482,7 @@ impl ObjectTableDelegate {
                         }
                     }
 
-                    return Ordering::Equal;
+                    Ordering::Equal
                 }
                 3 => {
                     let item_a = &self.rows[a];
@@ -1567,7 +1563,7 @@ impl TableDelegate for ObjectTableDelegate {
                     Checkbox::new("select-all-checkbox")
                         .tooltip("Toggle select")
                         .checked(
-                            self.filtered_indexes.len() > 0
+                            !self.filtered_indexes.is_empty()
                                 && self.selected_indexes.len() == self.filtered_indexes.len(),
                         )
                         .on_change(cx.listener(|this, val, _, _| {
@@ -1966,8 +1962,7 @@ impl ObjectMetaPanel {
                 if let Some(mime_type) = self
                     .object_meta
                     .as_ref()
-                    .map(|m| m.raw_headers.get("content-type"))
-                    .flatten()
+                    .and_then(|m| m.raw_headers.get("content-type"))
                     && mime_type.starts_with("image/")
                     && let Some(url) = self.presigned_url.clone()
                 {

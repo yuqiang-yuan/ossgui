@@ -132,7 +132,7 @@ impl MainView {
 
         let this_weak = cx.weak_entity();
 
-        let job_queue = cx.new(|cx| JobQueue::new(cx));
+        let job_queue = cx.new(JobQueue::new);
         let job_panel = cx.new(|cx| JobPanel::new(job_queue.clone(), window, cx));
 
         // 队列每次 notify 都会走到这里（包括每秒一次的速率重算），

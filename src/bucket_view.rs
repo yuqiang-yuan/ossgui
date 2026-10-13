@@ -87,8 +87,7 @@ impl BucketTableDelegate {
     pub fn row(&self, ix: usize) -> Option<&BucketSummary> {
         self.filtered_indexes
             .get(ix)
-            .map(|ix| self.rows.get(*ix))
-            .flatten()
+            .and_then(|ix| self.rows.get(*ix))
     }
 
     /// 唯一的派生状态重算入口。
@@ -287,15 +286,12 @@ impl BucketListPanel {
         let search_sub =
             cx.subscribe(
                 &search_state,
-                |view, state, event: &InputEvent, cx| match event {
-                    InputEvent::Change => {
-                        let s = state.read(cx).value();
-                        view.buckets_state.update(cx, |state, cx| {
-                            state.delegate_mut().apply_filter(&s);
-                            cx.notify();
-                        });
-                    }
-                    _ => {}
+                |view, state, event: &InputEvent, cx| if let InputEvent::Change = event {
+                    let s = state.read(cx).value();
+                    view.buckets_state.update(cx, |state, cx| {
+                        state.delegate_mut().apply_filter(&s);
+                        cx.notify();
+                    });
                 },
             );
 
