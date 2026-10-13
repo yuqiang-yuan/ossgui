@@ -17,7 +17,8 @@ gpui_kit::assets::icon_assets!(
         TicketX,
         CircleSlash2,
         X,
-        CircleEllipsis
+        CircleEllipsis,
+        CircleUserRound
     ]
 );
 

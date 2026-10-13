@@ -18,7 +18,12 @@ use gpui_kit::{
 };
 use reqwest_client::ReqwestClient;
 
-use crate::{assets::AppAssets, globals::APP_ID, main_view::MainView, settings::AppSettings};
+use crate::{
+    assets::AppAssets,
+    globals::{APP_ID, APP_NAME},
+    main_view::MainView,
+    settings::AppSettings,
+};
 
 fn main() {
     dotenvy::dotenv().ok();
@@ -27,7 +32,7 @@ fn main() {
         .with_http_client(std::sync::Arc::new(ReqwestClient::new()));
     app.run(|cx| {
         gpui_kit::init(cx);
-        cx.set_app_identity(APP_ID, "Ossgui");
+        cx.set_app_identity(APP_ID, APP_NAME);
 
         let settings = AppSettings::load();
 

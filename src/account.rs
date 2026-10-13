@@ -107,13 +107,19 @@ impl AccountSettings {
 
 pub struct AccountListDelegate {
     account_settings: Entity<AccountSettings>,
+    /// 列表行里的按钮要点回面板，跟 BucketTableDelegate 一个路子
+    account_panel: WeakEntity<AccountPanel>,
     selected_index: Option<IndexPath>,
 }
 
 impl AccountListDelegate {
-    fn new(account_settings: Entity<AccountSettings>) -> Self {
+    fn new(
+        account_settings: Entity<AccountSettings>,
+        account_panel: WeakEntity<AccountPanel>,
+    ) -> Self {
         Self {
             account_settings,
+            account_panel,
             selected_index: None,
         }
     }
@@ -160,13 +166,20 @@ impl ListDelegate for AccountListDelegate {
                                     ),
                             ),
                     )
-                    .child(
+                    .child({
+                        let panel = self.account_panel.clone();
+                        let id = row.get_id().clone();
                         Button::new(format!("use-account-{}", row.id))
                             .tooltip("Use this account")
                             .ghost()
                             .icon(Icon::new(IconName::ArrowRight).text_color(cx.theme().primary))
-                            .rounded_full(),
-                    )
+                            .rounded_full()
+                            .on_click(move |_, window, cx| {
+                                panel
+                                    .update(cx, |panel, cx| panel.use_account(&id, window, cx))
+                                    .ok();
+                            })
+                    })
                     .child({
                         let danger = cx.theme().danger;
                         let account_id = row.get_id().clone();
@@ -212,12 +225,16 @@ pub struct AccountPanel {
 impl AccountPanel {
     pub fn new(
         main_view: WeakEntity<MainView>,
+        account_settings: Entity<AccountSettings>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let account_settings = cx.new(|_| AccountSettings::load());
+        // 面板还不存在，但 cx.weak_entity() 已经能给出句柄 ——
+        // 委托里的按钮靠它点回面板
+        let this_weak = cx.weak_entity();
 
-        let account_list_delegate = AccountListDelegate::new(account_settings.clone());
+        let account_list_delegate = AccountListDelegate::new(account_settings.clone(), this_weak);
+
         let mut regions = oss_region_map()
             .iter()
             .map(|(k, _)| k.to_string())
@@ -226,7 +243,7 @@ impl AccountPanel {
 
         Self {
             main_view,
-            account_settings: account_settings.clone(),
+            account_settings,
             accounts_state: cx.new(|cx| ListState::new(account_list_delegate, window, cx)),
             aid_state: cx.new(|cx| InputState::new(window, cx)),
             asec_state: cx.new(|cx| InputState::new(window, cx)),
@@ -270,6 +287,66 @@ impl AccountPanel {
                         );
                     })
                 });
+            }
+        })
+        .detach();
+    }
+
+    /// 选定账号：把密钥从钥匙串读出来，交给 MainView 建会话。
+    ///
+    /// 读钥匙串是异步的（Linux 走 D-Bus，macOS 可能弹授权框），拿不到同步结果，
+    /// 所以这里读完再回主线程切场景 —— 这是唯一一处会创建 OSS client 的入口。
+    fn use_account(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(account) = self
+            .account_settings
+            .read(cx)
+            .accounts
+            .iter()
+            .find(|a| a.get_id() == id)
+            .cloned()
+        else {
+            return;
+        };
+
+        let load_task = account.load_secret(cx);
+        let window_handle = window.window_handle();
+        let main_view = self.main_view.clone();
+
+        cx.spawn(async move |_, cx| {
+            // 三种失败收敛成一条文案，后面只处理一次
+            let outcome = match load_task.await {
+                Ok(Some((_username, secret))) => String::from_utf8(secret).map_err(|_| {
+                    "The stored secret is not valid UTF-8. Delete and re-create this account."
+                        .to_string()
+                }),
+                // Ok(None) 是"没存过"，不是错误：首次启动、用户清过钥匙串、
+                // 换机器迁移都会走这条路
+                Ok(None) => Err(
+                    "No secret stored for this account. Delete and re-create it to set one."
+                        .to_string(),
+                ),
+                Err(err) => Err(format!("Failed to read the secret: {err:#}")),
+            };
+
+            match outcome {
+                Ok(secret) => {
+                    let _ = cx.update(|cx| {
+                        cx.update_window(window_handle, |_, window, cx| {
+                            main_view
+                                .update(cx, |main_view, cx| {
+                                    main_view.activate_account(account, secret, window, cx)
+                                })
+                                .ok();
+                        })
+                    });
+                }
+                Err(message) => {
+                    let _ = cx.update(|cx| {
+                        cx.update_window(window_handle, |_, window, cx| {
+                            window.push_notification((NotificationType::Error, message), cx);
+                        })
+                    });
+                }
             }
         })
         .detach();
