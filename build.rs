@@ -1,8 +1,14 @@
-//! 给 Windows 的 exe 嵌入图标、版本信息和 manifest。
+//! 给 Windows 的 exe 嵌入图标和版本信息。
 //!
 //! 其他平台这个脚本是空操作 —— `winresource` 只在
 //! `[target.'cfg(windows)'.build-dependencies]` 里，而且资源编译器 rc.exe
 //! 也只有 Windows SDK 才有。
+//!
+//! **不要在这里嵌 manifest。** gpui-pre 的 `windows-manifest` feature 是默认
+//! 开启的，它自己的 build.rs 已经通过 `resources/windows/gpui.rc` 嵌了一份，
+//! 里面带 PerMonitorV2 DPI 感知、SegmentHeap、supportedOS 和 Common-Controls v6。
+//! 再嵌一份会让 CVTRES 报 `CVT1100: duplicate resource. type:MANIFEST`，
+//! 链接直接失败。
 
 fn main() {
     #[cfg(windows)]
@@ -22,35 +28,6 @@ fn main() {
         let v = version_u64();
         res.set_version_info(winresource::VersionInfo::FILEVERSION, v);
         res.set_version_info(winresource::VersionInfo::PRODUCTVERSION, v);
-
-        // 这个 manifest 是必须的，不是为了好看：
-        //
-        // gpui-pre-windows 用 GetDpiForWindow() 拿显示器 DPI 来算缩放比，
-        // 也处理 WM_DPICHANGED。但进程如果不声明 DPI 感知，Windows 会把
-        // 这个 API 的返回值固定成 96 —— 于是 gpui 按 1.0 倍渲染，
-        // 系统再把整个窗口位图拉伸到实际 DPI，高分屏上就是一片模糊。
-        //
-        // PerMonitorV2 让进程拿到真实 DPI，多显示器之间拖动时也能正确切换。
-        res.set_manifest(
-            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
-  <assemblyIdentity type="win32" name="Ossgui" version="1.0.0.0"/>
-  <application xmlns="urn:schemas-microsoft-com:asm.v3">
-    <windowsSettings>
-      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">PerMonitorV2</dpiAwareness>
-      <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true/pm</dpiAware>
-    </windowsSettings>
-  </application>
-  <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
-    <security>
-      <requestedPrivileges>
-        <requestedExecutionLevel level="asInvoker" uiAccess="false"/>
-      </requestedPrivileges>
-    </security>
-  </trustInfo>
-</assembly>
-"#,
-        );
 
         res.compile()
             .expect("嵌入 Windows 资源失败（需要 Windows SDK 的 rc.exe）");
