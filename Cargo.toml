@@ -76,7 +76,7 @@ icons = [
 # 本地 `cargo build` / `cargo run` 完全不受影响，只有 `cargo packager`
 # 会签名；本机 keychain 里有这张证书就能在本地出带签名的 dmg。
 [package.metadata.packager.macos]
-signingIdentity = "Developer ID Application: (VLB3FPR7W9)"
+signingIdentity = "Developer ID Application: Beijing MosoInk Information Technology Co., Ltd. (VLB3FPR7W9)"
 
 [package.metadata.packager.deb]
 section = "utils"
