@@ -61,7 +61,12 @@ cargo packager --release --formats deb,appimage
 cargo generate-rpm -o dist
 ```
 
-要出包就在 Actions 页面手动跑 **Package**，然后下载 artifact。
+在 Actions 页面手动跑 **Package**：
+
+- `release_tag` 留空 → **只构建**，四个 artifact 在 run 页面保留 90 天
+- 填上（比如 `v0.1.0`）→ 构建完还会**发布一个 GitHub Release**，把全部安装包挂上去。Release 先建为**草稿**，检查过产物再点 Publish
+
+artifact 不是给用户下载的渠道——会过期，而且下载需要登录。用户下载走 Release。
 
 ### 图标
 

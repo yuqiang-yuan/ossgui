@@ -3,6 +3,11 @@ name: Package
 # 只在手动触发。不做"推 tag 自动发版"，需要的时候自己来点。
 on:
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: '发布成 GitHub Release 用的 tag，例如 v0.1.0。留空则只构建，不发布'
+        required: false
+        type: string
 
 env:
   CARGO_TERM_COLOR: always
@@ -169,3 +174,47 @@ jobs:
           name: windows-x64
           path: dist/*.exe
           if-no-files-found: error
+
+  # 把四个 job 的产物汇总成一个 GitHub Release。
+  #
+  # workflow_dispatch 的 release_tag 留空时整个 job 跳过 —— 平时就是纯构建，
+  # 想发版才填 tag。
+  release:
+    name: 发布 Release
+    needs: [linux-x64, linux-arm64, macos-arm64, windows-x64]
+    if: inputs.release_tag != ''
+    runs-on: ubuntu-latest
+    permissions:
+      # 创建 Release 要写权限。仓库默认给的 GITHUB_TOKEN 是只读的，
+      # 不显式提权会在最后一步 403。
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          # 把四个 artifact 解到同一个目录，而不是各自的子目录
+          merge-multiple: true
+
+      - name: 整理产物文件名
+        # 用 env 而不是直接把 ${{ }} 插进脚本里，避免输入被当成 shell 代码执行
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          cd dist
+          ls -la
+
+          # deb / rpm / AppImage / dmg 的文件名里本来就带架构，能看出平台。
+          # 只有 exe 叫 ossgui.exe，从 Release 页面下载时看不出是什么，
+          # 所以给它补上版本和平台。
+          mv ossgui.exe "ossgui-${RELEASE_TAG}-windows-x64.exe"
+
+      - uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ inputs.release_tag }}
+          name: ${{ inputs.release_tag }}
+          files: dist/*
+          # 从上次 tag 以来的 commit 自动生成更新说明
+          generate_release_notes: true
+          # 先存成草稿：Release 一旦公开就会被镜像和索引，发之前自己看一眼
+          # 产物齐不齐。确认没问题在页面上点 Publish 就行。
+          draft: true

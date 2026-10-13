@@ -62,7 +62,12 @@ cargo packager --release --formats deb,appimage
 cargo generate-rpm -o dist
 ```
 
-To release, run the **Package** workflow manually from the Actions tab and download the artifacts.
+To build, run the **Package** workflow manually from the Actions tab:
+
+- Leave the `release_tag` input **empty** to just build. The four artifacts stay on the run page for 90 days.
+- Fill it in (e.g. `v0.1.0`) to also publish a GitHub Release with every package attached. The release is created as a **draft** so you can check the assets before making it public.
+
+Workflow artifacts are not a download channel — they expire, and GitHub requires a login to fetch them. Releases are what users download from.
 
 ### Icons
 
