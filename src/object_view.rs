@@ -33,6 +33,11 @@ pub struct ObjectListPanel {
     main_view: WeakEntity<MainView>,
     bucket_name: String,
     prefix: String,
+    /// 服务端 prefix 搜索词（搜索框回车触发）。OSS 只有前缀匹配没有包含匹配，
+    /// 所以"搜索"本质是前缀导航：API 前缀 = prefix + server_prefix，
+    /// 返回的就是普通列表，continuation 翻页照常。
+    /// 本地过滤（delegate.search）叠加在它上面，互不干扰。
+    server_prefix: Option<String>,
     page_size: usize,
     next_continuation_token: Option<String>,
     is_truncated: bool,
@@ -176,16 +181,31 @@ impl ObjectListPanel {
                 .clean_on_escape()
         });
 
-        let search_sub =
-            cx.subscribe(
-                &search_state,
-                |this, state, event: &InputEvent, cx| if let InputEvent::Change = event {
+        let search_sub = cx.subscribe(&search_state, |this, state, event: &InputEvent, cx| {
+            match event {
+                InputEvent::Change => {
                     let s = state.read(cx).value();
+
+                    // 清空输入框（× 或删光）= 顺带退出服务端搜索，回到目录全量列表
+                    if s.is_empty() {
+                        this.exit_server_search(cx);
+                        return;
+                    }
+
                     this.objects_state.update(cx, |state, _| {
                         state.delegate_mut().apply_filter(&s);
                     });
-                },
-            );
+                }
+                // 回车 = 服务端 prefix 查询：查的是整个目录（max keys 之后也能翻到）
+                InputEvent::PressEnter { .. } => {
+                    let s = state.read(cx).value().trim().to_string();
+                    this.next_continuation_token = None;
+                    this.server_prefix = if s.is_empty() { None } else { Some(s) };
+                    this.load_objects(cx);
+                }
+                _ => {}
+            }
+        });
 
         let page_size_state = cx.new(|cx| {
             SelectState::new(
@@ -228,6 +248,7 @@ impl ObjectListPanel {
             ossclient: Arc::new(ossclient.clone_to(region, endpoint)),
             bucket_name: bucket_name.to_string(),
             prefix: String::new(),
+            server_prefix: None,
             page_size: 100usize,
             next_continuation_token: None,
             is_truncated: false,
@@ -255,6 +276,22 @@ impl ObjectListPanel {
     /// 用户主动重新拉取（翻页、切目录、改 page size）：显示加载态
     fn load_objects(&mut self, cx: &mut Context<Self>) {
         self.load_objects_inner(false, cx);
+    }
+
+    /// 退出服务端 prefix 搜索，回目录全量列表并重置翻页。
+    /// 输入框被清空（Change 空值）时也走这里 —— 此时本地过滤一并清掉；
+    /// 没在搜索时只清本地过滤，不发请求。
+    fn exit_server_search(&mut self, cx: &mut Context<Self>) {
+        let was_searching = self.server_prefix.take().is_some();
+
+        self.objects_state.update(cx, |state, _| {
+            state.delegate_mut().apply_filter("");
+        });
+
+        if was_searching {
+            self.next_continuation_token = None;
+            self.load_objects(cx);
+        }
     }
 
     /// 任务结束后台刷新：不显示加载态，旧行保留到新数据到达
@@ -304,14 +341,18 @@ impl ObjectListPanel {
         let client = self.ossclient.clone();
         let handle = tokio_runtime().handle().clone();
         let bucket_name = self.bucket_name.clone();
-        let prefix = self.prefix.clone();
+        // API 前缀 = 目录前缀 + 服务端搜索词（没在搜索时就是目录本身）
+        let dir_prefix = self.prefix.clone();
+        let server_prefix = self.server_prefix.clone();
+        let api_prefix =
+            format!("{dir_prefix}{}", server_prefix.as_deref().unwrap_or(""));
         let next_continuation_token = self.next_continuation_token.clone();
         let max_keys = self.page_size;
 
         self.load_task = cx.spawn(async move |this, cx| {
             let join = handle.spawn(async move {
                 let mut options = ListObjectsOptionsBuilder::new()
-                    .prefix(prefix)
+                    .prefix(api_prefix)
                     .delimiter('/')
                     .max_keys(max_keys as u32);
 
@@ -336,7 +377,7 @@ impl ObjectListPanel {
                         this.objects_state.update(cx, |state, cx| {
                             let ListObjectsResult {
                                 name,
-                                prefix,
+                                prefix: _,
                                 max_keys,
                                 is_truncated,
                                 key_count,
@@ -360,10 +401,12 @@ impl ObjectListPanel {
                                 .collect::<Vec<_>>();
 
                             // while request with prefix, there will be an item in the contents which key is the same as prefix. this will be removed before renderring
+                            // 注意比的是"目录前缀"不是 API 前缀：服务端搜索时 API
+                            // 前缀（如 "log"）本身可能恰好是个真实对象，要保留
                             rows.extend(
                                 contents
                                     .into_iter()
-                                    .filter(|o| o.key != prefix)
+                                    .filter(|o| o.key != dir_prefix)
                                     .map(OssObjectItem::File),
                             );
 
@@ -374,7 +417,10 @@ impl ObjectListPanel {
                                 // 用户主动换页/换目录：清空勾选是对的
                                 state.delegate_mut().set_rows(rows);
                             }
-                            state.delegate_mut().set_prefix(prefix);
+                            state.delegate_mut().set_prefix(dir_prefix);
+                            state
+                                .delegate_mut()
+                                .set_server_prefix(server_prefix.clone());
                             cx.notify();
                         });
                     }
@@ -481,12 +527,37 @@ impl ObjectListPanel {
                             .label(self.bucket_name.clone())
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.prefix = String::new();
+                                this.server_prefix = None;
                                 this.next_continuation_token = None;
                                 this.load_objects(cx);
                             })),
                     )
-                    .children(self.breadcrumb_items(window, cx)),
+                    .children(self.breadcrumb_items(window, cx))
+                    .children(self.server_prefix_chip(cx)),
             )
+    }
+
+    /// 服务端 prefix 搜索的 chip：显示当前搜索词，点击 = 退出搜索回全量列表。
+    /// 放面包屑里，因为 prefix 搜索本质上就是导航的一部分。
+    fn server_prefix_chip(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let query = self.server_prefix.as_ref()?;
+
+        Some(
+            Button::new("server-prefix-chip")
+                .ghost()
+                .small()
+                .compact()
+                .icon(IconName::Search)
+                .label(query.clone())
+                .tooltip("Clear prefix search")
+                .on_click(cx.listener(|this, _, window, cx| {
+                    // set_value 不发 Change 事件，所以要显式退出
+                    this.search_state.update(cx, |state, cx| {
+                        state.set_value("", window, cx);
+                    });
+                    this.exit_server_search(cx);
+                })),
+        )
     }
 
     /// Components for prefix in the breadcrumb bars
@@ -515,6 +586,10 @@ impl ObjectListPanel {
                     .label(format!("/{p}"))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.prefix = prefix.clone();
+                        // 换目录 = 离开搜索；continuation token 是跟着前缀走的，
+                        // 不重置会拿旧 token 查新前缀，结果错乱
+                        this.server_prefix = None;
+                        this.next_continuation_token = None;
                         this.load_objects(cx);
                     }))
             })
@@ -1414,6 +1489,8 @@ impl OssObjectItem {
 struct ObjectTableDelegate {
     rows: Vec<OssObjectItem>,
     prefix: String,
+    /// 服务端 prefix 搜索词，只用于空态提示文案
+    server_prefix: Option<String>,
     /// This are rows after applying filter
     filtered_indexes: Vec<usize>,
     loading: bool,
@@ -1430,6 +1507,7 @@ impl ObjectTableDelegate {
             object_list_panel,
             rows: Vec::new(),
             prefix: String::new(),
+            server_prefix: None,
             filtered_indexes: Vec::new(),
             loading: false,
             search: String::new(),
@@ -1505,6 +1583,10 @@ impl ObjectTableDelegate {
 
     fn set_prefix(&mut self, prefix: String) {
         self.prefix = prefix;
+    }
+
+    fn set_server_prefix(&mut self, prefix: Option<String>) {
+        self.server_prefix = prefix;
     }
 
     // pub fn extend_rows(&mut self, rows: Vec<OssObjectItem>) {
@@ -1773,7 +1855,9 @@ impl TableDelegate for ObjectTableDelegate {
                             let key_cloned = key_cloned.clone();
                             object_list_panel
                                 .update(cx, move |panel, cx| {
+                                    // 进目录 = 离开搜索（搜索词只对当前目录这层有意义）
                                     panel.prefix = key_cloned;
+                                    panel.server_prefix = None;
                                     panel.next_continuation_token = None;
                                     panel.load_objects(cx);
                                 })
@@ -1938,6 +2022,28 @@ impl TableDelegate for ObjectTableDelegate {
             }
             _ => div(),
         }
+    }
+
+    fn render_empty(
+        &mut self,
+        _: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        // 服务端搜索打空了要教一下语义：OSS 只有前缀匹配，拿 key 中间一段来搜会扑空
+        let hint = match &self.server_prefix {
+            Some(p) => format!("No objects with prefix '{p}' (prefix match, not contains)"),
+            None => "No objects".to_string(),
+        };
+
+        div()
+            .size_full()
+            .v_flex()
+            .items_center()
+            .justify_center()
+            .gap_3()
+            .text_color(cx.theme().muted_foreground.opacity(0.6))
+            .child(Icon::new(IconName::Inbox).size_12())
+            .child(hint)
     }
 
     fn perform_sort(
