@@ -660,33 +660,44 @@ impl Render for MainView {
 /// 所以 macOS 上 Help 里不再放一份，否则菜单栏里会出现两个 About。
 fn build_menus() -> Vec<Menu> {
     let about_label = format!("About {APP_NAME}");
-    let mut menus = Vec::new();
 
+    // 两个平台的菜单顺序不同，直接各自写整个列表（cfg 块表达式作尾表达式，
+    // 只有一个会参与编译）
     #[cfg(target_os = "macos")]
-    menus.push(Menu {
-        name: APP_NAME.into(),
-        items: vec![
-            MenuItem::action(about_label, AboutAction),
-            MenuItem::separator(),
-            MenuItem::action("Quit", QuitAction),
-        ],
-        disabled: false,
-    });
-
-    menus.push(Menu {
-        name: "File".into(),
-        items: vec![MenuItem::action("Quit", QuitAction)],
-        disabled: false,
-    });
+    {
+        vec![
+            Menu {
+                name: APP_NAME.into(),
+                items: vec![
+                    MenuItem::action(about_label, AboutAction),
+                    MenuItem::separator(),
+                    MenuItem::action("Quit", QuitAction),
+                ],
+                disabled: false,
+            },
+            Menu {
+                name: "File".into(),
+                items: vec![MenuItem::action("Quit", QuitAction)],
+                disabled: false,
+            },
+        ]
+    }
 
     #[cfg(not(target_os = "macos"))]
-    menus.push(Menu {
-        name: "Help".into(),
-        items: vec![MenuItem::action(about_label, AboutAction)],
-        disabled: false,
-    });
-
-    menus
+    {
+        vec![
+            Menu {
+                name: "File".into(),
+                items: vec![MenuItem::action("Quit", QuitAction)],
+                disabled: false,
+            },
+            Menu {
+                name: "Help".into(),
+                items: vec![MenuItem::action(about_label, AboutAction)],
+                disabled: false,
+            },
+        ]
+    }
 }
 
 /// Add a button to switch theme (dark/light)

@@ -23,6 +23,10 @@ use crate::{
     actions::DeleteAccountAction, common::oss_region_map, globals::APP_ID, main_view::MainView,
 };
 
+/// `Account::load_secret` 的返回类型。钥匙串里没存过 = `Ok(None)`，
+/// 读失败才是 Err —— 这个三元嵌套太长，拆个别名出来。
+pub type LoadSecretTask = Task<Result<Option<(String, Vec<u8>)>, anyhow::Error>>;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Account {
     id: String,
@@ -57,10 +61,7 @@ impl Account {
         )
     }
 
-    pub fn load_secret(
-        &self,
-        cx: &mut App,
-    ) -> Task<Result<Option<(String, Vec<u8>)>, anyhow::Error>> {
+    pub fn load_secret(&self, cx: &mut App) -> LoadSecretTask {
         cx.read_credentials(format!("ossgui://accounts/{}", self.id).as_str())
     }
 
@@ -138,9 +139,7 @@ impl ListDelegate for AccountListDelegate {
         _: &mut Window,
         cx: &mut Context<ListState<Self>>,
     ) -> Option<Self::Item> {
-        let Some(row) = self.account_settings.read(cx).accounts.get(ix.row) else {
-            return None;
-        };
+        let row = self.account_settings.read(cx).accounts.get(ix.row)?;
 
         Some(
             ListItem::new(format!("account-{}", row.id)).child(

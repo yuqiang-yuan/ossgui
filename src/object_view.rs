@@ -202,7 +202,7 @@ impl ObjectListPanel {
                 SelectEvent::Confirm(item) => {
                     if let Some(s) = item {
                         this.next_continuation_token = None;
-                        this.page_size = usize::from_str_radix(s, 10).unwrap_or(100usize);
+                        this.page_size = s.parse::<usize>().unwrap_or(100);
                         this.load_objects(cx);
                     }
                 }
@@ -2092,7 +2092,7 @@ impl ObjectMetaPanel {
                     };
 
                     let s = this.sign_duration_state.read(cx).value();
-                    let Ok(n) = u32::from_str_radix(s.as_str(), 10) else {
+                    let Ok(n) = s.as_str().parse::<u32>() else {
                         window.push_notification((NotificationType::Error, "Please input a valid duration number"), cx);
                         return;
                     };
