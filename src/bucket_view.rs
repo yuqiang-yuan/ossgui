@@ -7,12 +7,23 @@ use ali_oss_rs::{
     common::StorageClass,
 };
 use gpui_kit::{
-    App, AppContext, Context, Div, Entity, Hsla, IntoElement, ParentElement, Render, Styled, Subscription, Task, TextAlign, WeakEntity, Window, assets::IconName, base::{
+    App, AppContext, Context, Div, Entity, Hsla, IntoElement, ParentElement, Render, Styled,
+    Subscription, Task, WeakEntity, Window,
+    assets::IconName,
+    base::{
         Disableable, Placement, StyledExt,
         input::{InputEvent, InputState},
-    }, component::{
-        ActiveTheme, Icon, Sizable, WindowExt, button::{Button, ButtonVariants}, description_list::DescriptionList, input::Input, notification::NotificationType, progress::ProgressCircle, table::{Column, ColumnSort, DataTable, TableDelegate, TableState},
-    }, div, px,
+    },
+    component::{
+        ActiveTheme, Icon, Sizable, WindowExt,
+        button::{Button, ButtonVariants},
+        description_list::{DescriptionItem, DescriptionList},
+        input::Input,
+        notification::NotificationType,
+        progress::ProgressCircle,
+        table::{Column, ColumnSort, DataTable, TableDelegate, TableState},
+    },
+    div, px,
 };
 
 use crate::{
@@ -159,8 +170,17 @@ impl TableDelegate for BucketTableDelegate {
 
         match col_ix {
             0 => div()
-                .text_right()
-                .child(format!("{}", row_ix + 1))
+                .size_full()
+                .h_flex()
+                .items_end()
+                .child(
+                    div()
+                        .size_full()
+                        .v_flex()
+                        .justify_center()
+                        .text_sm()
+                        .child(format!("{}", row_ix + 1)),
+                )
                 .into_any_element(),
             1 => div()
                 .size_full()
@@ -177,13 +197,17 @@ impl TableDelegate for BucketTableDelegate {
                 let panel = self.bucket_list_panel.clone();
                 let name = row.name.clone();
                 let region = row.region.clone();
+
                 div()
+                    .size_full()
                     .h_flex()
+                    .items_start()
                     .child(
                         Button::new(format!("bucket-{}-button", row.name))
+                            .h_full()
                             .text()
-                            .text_align(TextAlign::Left)
-                            .label(row.name.clone())
+                            .text_sm()
+                            .child(row.name.clone())
                             .on_click(move |_, window, cx| {
                                 println!("bucket: {name} is clicked");
                                 panel
@@ -195,27 +219,39 @@ impl TableDelegate for BucketTableDelegate {
                     )
                     .into_any_element()
             }
-            3 => div().child(row.region.clone()).into_any_element(),
+            3 => div()
+                .size_full()
+                .text_sm()
+                .v_flex()
+                .justify_center()
+                .child(row.region.clone())
+                .into_any_element(),
             4 => div()
+                .size_full()
+                .text_sm()
+                .v_flex()
+                .justify_center()
                 .child(format_datetime(&row.creation_date))
                 .into_any_element(),
             5 => div()
+                .size_full()
+                .text_sm()
+                .v_flex()
+                .justify_center()
                 .child(row.storage_class.to_string())
                 .into_any_element(),
             6 => {
                 let panel = self.bucket_list_panel.clone();
                 let name = row.name.clone();
                 div()
-                    .h_full()
-                    .h_flex()
-                    .items_center()
+                    .size_full()
+                    .v_flex()
                     .justify_center()
-                    .gap_1()
                     .child(
                         Button::new(format!("bucket-{}-info-button", row.name))
                             .tooltip("Bucket detail")
                             .icon(IconName::Info)
-                            .text()
+                            .ghost()
                             .rounded_full()
                             .compact()
                             .on_click(move |_, window, cx| {
@@ -253,8 +289,10 @@ impl TableDelegate for BucketTableDelegate {
 
         div()
             .size_full()
-            .text_align(col.align)
-            .child(col.name.clone())
+            .text_sm()
+            .v_flex()
+            .justify_center()
+            .child(div().text_align(col.align).child(col.name.clone()))
     }
 }
 
@@ -283,17 +321,15 @@ impl BucketListPanel {
                 .clean_on_escape()
         });
 
-        let search_sub =
-            cx.subscribe(
-                &search_state,
-                |view, state, event: &InputEvent, cx| if let InputEvent::Change = event {
-                    let s = state.read(cx).value();
-                    view.buckets_state.update(cx, |state, cx| {
-                        state.delegate_mut().apply_filter(&s);
-                        cx.notify();
-                    });
-                },
-            );
+        let search_sub = cx.subscribe(&search_state, |view, state, event: &InputEvent, cx| {
+            if let InputEvent::Change = event {
+                let s = state.read(cx).value();
+                view.buckets_state.update(cx, |state, cx| {
+                    state.delegate_mut().apply_filter(&s);
+                    cx.notify();
+                });
+            }
+        });
 
         let this_weak = cx.weak_entity();
         let this = Self {
@@ -479,6 +515,8 @@ impl Render for BucketListPanel {
             .child(
                 DataTable::new(&self.buckets_state)
                     .stripe(false)
+                    .header_row_height(px(40.0))
+                    .with_size(px(40.0))
                     .scrollbar_visible(true, true),
             )
     }
@@ -554,22 +592,27 @@ impl BucketDetailPanel {
 
     fn render_detail(&self) -> Div {
         if let Some(d) = &self.bucket_detail {
+            // 值这一列用 element 形式自己控制字号 —— 默认字号偏大。
+            // DescriptionText 只有 From<AnyElement>，div 要 into_any_element() 过一道
+            let sm = |text: String| div().text_sm().child(text).into_any_element();
+
             div().child(
-                DescriptionList::horizontal()
+                DescriptionList::new()
                     .columns(1)
-                    .item("Name", d.name.as_str(), 1)
-                    .item("Location", d.location.as_str(), 1)
-                    .item("Storage", d.storage_class.to_string(), 1)
-                    .item("Created at", format_datetime(&d.creation_date), 1)
-                    .item(
-                        "Acl",
-                        d.access_control_list
-                            .iter()
-                            .map(|acl| acl.to_string())
-                            .collect::<Vec<_>>()
-                            .join("\n"),
-                        1,
-                    ),
+                    .children([
+                        DescriptionItem::new("Name").value(sm(d.name.to_string())),
+                        DescriptionItem::new("Location").value(sm(d.location.to_string())),
+                        DescriptionItem::new("Storage").value(sm(d.storage_class.to_string())),
+                        DescriptionItem::new("Created at")
+                            .value(sm(format_datetime(&d.creation_date))),
+                        DescriptionItem::new("Acl").value(sm(
+                            d.access_control_list
+                                .iter()
+                                .map(|acl| acl.to_string())
+                                .collect::<Vec<_>>()
+                                .join("\n"),
+                        )),
+                    ]),
             )
         } else {
             div().text_center().child("Something went wrong...")

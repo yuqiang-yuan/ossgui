@@ -10,11 +10,11 @@ use ali_oss_rs::{
     presign_common::PresignGetOptionsBuilder,
 };
 use gpui_kit::{
-    App, AppContext, ClipboardItem, Context, Div, Entity, InteractiveElement, IntoElement, ParentElement, PathPromptOptions, Render, Styled, StyledImage, Subscription, Task, TextAlign, WeakEntity, Window, assets::IconName, base::{
+    App, AppContext, ClipboardItem, Context, Div, Entity, ExternalPaths, InteractiveElement, IntoElement, ParentElement, PathPromptOptions, Render, Styled, StyledImage, Subscription, Task, TextAlign, WeakEntity, Window, assets::IconName, base::{
         Disableable, IndexPath, Placement, StyledExt,
         input::{InputEvent, InputState},
     }, component::{
-        ActiveTheme, Icon, Sizable, WindowExt, button::{Button, ButtonVariant, ButtonVariants}, checkbox::Checkbox, description_list::{DescriptionItem, DescriptionList}, input::Input, marker::{Marker, MarkerAlignment, MarkerContent, MarkerVariant}, menu::DropdownMenu, notification::NotificationType, progress::ProgressCircle, select::{Select, SelectEvent, SelectState}, table::{Column, ColumnSort, DataTable, TableDelegate, TableState},
+        ActiveTheme, Icon, Sizable, WindowExt, button::{Button, ButtonVariant, ButtonVariants}, checkbox::Checkbox, description_list::{DescriptionItem, DescriptionList}, input::Input, marker::{Marker, MarkerAlignment, MarkerContent, MarkerVariant}, menu::{DropdownMenu, PopupMenuItem}, notification::NotificationType, progress::ProgressCircle, select::{Select, SelectEvent, SelectState}, table::{Column, ColumnSort, DataTable, TableDelegate, TableState},
     }, div, img, px,
 };
 
@@ -735,11 +735,7 @@ impl ObjectListPanel {
             prompt: Some("Upload".into()),
         });
 
-        let main_view = self.main_view.clone();
-        let bucket_name = self.bucket_name.clone();
-        let prefix = self.prefix.clone();
-
-        cx.spawn_in(window, async move |_, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             let paths = match picked.await {
                 Ok(Ok(Some(paths))) if !paths.is_empty() => paths,
                 Ok(Err(err)) => {
@@ -759,6 +755,28 @@ impl ObjectListPanel {
                 _ => return, // 用户取消
             };
 
+            // 选完之后，和拖放汇入同一条上传链路。
+            // 借道 weak entity：如果用户在对话框开着的时候切走了 bucket/账号，
+            // 面板已经卸载，这里会静默放弃 —— 上传到用户已经离开的位置才是错的。
+            this.update_in(cx, move |this, window, cx| {
+                this.start_upload(paths, window, cx)
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// 上传链路的公共尾部：后台扫描（展开目录、统计大小）→ 入队 → 通知。
+    ///
+    /// 文件选择器（`select_files_for_upload`）和拖放（`on_drop_for_upload`）
+    /// 都汇到这里。拖进来的 paths 本来就可能文件和目录混着来，
+    /// `scan_upload_paths` 按混合输入处理。
+    fn start_upload(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+        let main_view = self.main_view.clone();
+        let bucket_name = self.bucket_name.clone();
+        let prefix = self.prefix.clone();
+
+        cx.spawn_in(window, async move |_, cx| {
             // 展开目录是本地 I/O，放后台执行器，UI 线程不碰
             let (candidates, truncated) = cx
                 .background_spawn(async move { scan_upload_paths(paths) })
@@ -1117,6 +1135,42 @@ impl ObjectListPanel {
             return;
         }
 
+        self.confirm_delete(files, folders, true, window, cx);
+    }
+
+    /// 行内"更多"菜单里的删除：只删这一行的 object/folder，与勾选无关。
+    ///
+    /// 跟工具栏 More（`on_delete_action`）的区别就在这里 —— 不带勾选集合，
+    /// 也不清勾选；等删除完成刷新，这一行自己会消失。
+    fn delete_row(
+        &mut self,
+        key: String,
+        is_folder: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (files, folders) = if is_folder {
+            (Vec::new(), vec![key])
+        } else {
+            (vec![key], Vec::new())
+        };
+
+        self.confirm_delete(files, folders, false, window, cx);
+    }
+
+    /// 删除的公共尾部：确认框 → 按 (files, folders) 拆任务入队。
+    ///
+    /// `clear_selection`：入队后要不要清空勾选。批量删除删的就是勾选，要清；
+    /// 行内单删与勾选无关，不清 —— `refresh_rows` 是按 key 找回勾选的，
+    /// 被删的那行如果碰巧勾着，刷新后自然从勾选里消失。
+    fn confirm_delete(
+        &mut self,
+        files: Vec<String>,
+        folders: Vec<String>,
+        clear_selection: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let title = match (files.len(), folders.len()) {
             (1, 0) => "Delete 1 object?".to_string(),
             (n, 0) => format!("Delete {n} objects?"),
@@ -1173,15 +1227,17 @@ impl ObjectListPanel {
                         })
                         .ok();
 
-                    // 已经交给队列了，清掉勾选
-                    panel
-                        .update(cx, |panel, cx| {
-                            panel.objects_state.update(cx, |state, cx| {
-                                state.delegate_mut().unselect_all();
-                                cx.notify();
-                            });
-                        })
-                        .ok();
+                    if clear_selection {
+                        // 已经交给队列了，清掉勾选
+                        panel
+                            .update(cx, |panel, cx| {
+                                panel.objects_state.update(cx, |state, cx| {
+                                    state.delegate_mut().unselect_all();
+                                    cx.notify();
+                                });
+                            })
+                            .ok();
+                    }
 
                     true // 关闭对话框
                 })
@@ -1205,11 +1261,27 @@ impl ObjectListPanel {
     ) {
         self.select_files_for_upload(true, window, cx);
     }
+
+    /// 从文件管理器拖文件/文件夹进窗口，松手即上传。
+    ///
+    /// `ExternalPaths` 是 gpui 给外部拖放的载荷类型：平台的 FileDropEvent
+    /// 在窗口分发处被翻译成 active_drag（值为 ExternalPaths）+ 普通 MouseUp，
+    /// 所以 `on_drop::<ExternalPaths>` 能接到从文件管理器拖进来的路径；
+    /// 内部拖拽（比如 dock 的 tab）是别的载荷类型，TypeId 对不上，不会误触。
+    fn on_drop_for_upload(
+        &mut self,
+        paths: &ExternalPaths,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.start_upload(paths.paths().to_vec(), window, cx);
+    }
 }
 
 impl Render for ObjectListPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
+            .relative()
             .on_action(cx.listener(Self::on_open_files_for_upload_action))
             .on_action(cx.listener(Self::on_open_folders_for_upload_action))
             .on_action(cx.listener(Self::on_download_action))
@@ -1224,10 +1296,26 @@ impl Render for ObjectListPanel {
                 div().px_2().flex_grow_1().child(
                     DataTable::new(&self.objects_state)
                         .stripe(false)
+                        .with_size(px(40.0))
+                        .header_row_height(px(40.0))
                         .scrollbar_visible(true, true),
                 ),
             )
             .child(self.paginator_bar(window, cx))
+            // 拖放覆盖层：平时完全透明。外部文件拖到面板上方时按 drop_target
+            // 主题色蒙一层（gpui dock 的 tab 面板就是这么做的）。放最后当
+            // 最后一个 child 才能盖住整个面板；hitbox 是 Normal 行为，不挡
+            // 下层交互，也没有条件渲染 —— 高亮的显示/消失全由 drag_over
+            // 样式机制自己管，拖出窗口（FileDropEvent::Exited）后自动消退。
+            .child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .drag_over::<ExternalPaths>(|style, _, _, cx| {
+                        style.bg(cx.theme().tokens.drop_target)
+                    })
+                    .on_drop(cx.listener(Self::on_drop_for_upload)),
+            )
     }
 }
 
@@ -1312,6 +1400,15 @@ impl OssObjectItem {
             Self::Folder(_) => 0u64,
         }
     }
+
+    /// 最后修改时间的原始字符串（ISO 8601，定宽，字典序即时间序）。
+    /// 文件夹是 common_prefixes 造的虚拟行，没有这个字段。
+    fn get_last_modified(&self) -> &str {
+        match self {
+            Self::File(object_summary) => &object_summary.last_modified,
+            Self::Folder(_) => "",
+        }
+    }
 }
 
 struct ObjectTableDelegate {
@@ -1356,12 +1453,16 @@ impl ObjectTableDelegate {
                     .text_right()
                     .movable(false)
                     .sortable(),
+                Column::new("last_modified", "Last modified")
+                    .width(px(160.0))
+                    .movable(false)
+                    .sortable(),
                 Column::new("storage_class", "Storage class")
                     .width(px(120.0))
                     .movable(false),
                 // 行内操作列（跟 bucket view 的形制一致）。
-                // 两个按钮所以比 bucket view 那个 60 宽一点
-                Column::new("actions", "").width(px(80.0)).movable(false),
+                // 三个按钮（下载/详情/更多）所以比 bucket view 那个 60 宽一点
+                Column::new("actions", "").width(px(130.0)).movable(false),
             ],
         }
     }
@@ -1502,6 +1603,28 @@ impl ObjectTableDelegate {
                     let o = item_a.get_size().cmp(&item_b.get_size());
                     if desc { o.reverse() } else { o }
                 }
+                4 => {
+                    let item_a = &self.rows[a];
+                    let item_b = &self.rows[b];
+                    if item_a.is_folder() && item_b.is_folder() {
+                        return Ordering::Equal;
+                    }
+
+                    if item_a.is_folder() && item_b.is_file() {
+                        return Ordering::Less;
+                    }
+
+                    if item_a.is_file() && item_b.is_folder() {
+                        return Ordering::Greater;
+                    }
+
+                    // ISO 8601 定宽字符串，字典序即时间序（跟 bucket view
+                    // 的 created_at 排序同一做法）
+                    let o = item_a
+                        .get_last_modified()
+                        .cmp(item_b.get_last_modified());
+                    if desc { o.reverse() } else { o }
+                }
                 _ => Ordering::Equal,
             }
         });
@@ -1577,8 +1700,10 @@ impl TableDelegate for ObjectTableDelegate {
         } else {
             div()
                 .size_full()
-                .text_align(col.align)
-                .child(col.name.clone())
+                .text_sm()
+                .v_flex()
+                .justify_center()
+                .child(div().text_align(col.align).child(col.name.clone()))
         }
     }
 
@@ -1635,12 +1760,14 @@ impl TableDelegate for ObjectTableDelegate {
                     })
                     .size_4(),
                 ),
-            2 => div().size_full().h_flex().child({
+            2 => div().size_full().h_flex().items_start().child({
                 let object_list_panel = self.object_list_panel.clone();
                 let key_cloned = key.clone();
                 Button::new(format!("goto-folder-button-{}", key))
-                    .label(name)
+                    .h_full()
                     .text()
+                    .text_sm()
+                    .child(name.to_string())
                     .on_click(move |_, window, cx| {
                         if is_folder {
                             let key_cloned = key_cloned.clone();
@@ -1663,18 +1790,36 @@ impl TableDelegate for ObjectTableDelegate {
             }),
             3 => div()
                 .size_full()
+                .text_sm()
+                .v_flex()
+                .justify_center()
                 .text_align(TextAlign::Right)
                 .child(if is_folder {
                     "-".to_string()
                 } else {
                     format_file_size(file_size)
                 }),
-            4 => div().child(if let OssObjectItem::File(f) = row {
-                f.storage_class.to_string()
-            } else {
-                "-".to_string()
-            }),
-            5 => {
+            4 => div()
+                .size_full()
+                .text_sm()
+                .v_flex()
+                .justify_center()
+                .child(if let OssObjectItem::File(f) = row {
+                    format_datetime(&f.last_modified)
+                } else {
+                    "-".to_string()
+                }),
+            5 => div()
+                .size_full()
+                .text_sm()
+                .v_flex()
+                .justify_center()
+                .child(if let OssObjectItem::File(f) = row {
+                    f.storage_class.to_string()
+                } else {
+                    "-".to_string()
+                }),
+            6 => {
                 let panel = self.object_list_panel.clone();
                 let key = key.to_string();
 
@@ -1684,7 +1829,7 @@ impl TableDelegate for ObjectTableDelegate {
                     Button::new(format!("download-{key}-button"))
                         .tooltip("Download")
                         .icon(IconName::CloudDownload)
-                        .text()
+                        .ghost()
                         .rounded_full()
                         .compact()
                         .on_click(move |_, window, cx| {
@@ -1711,14 +1856,25 @@ impl TableDelegate for ObjectTableDelegate {
                         })
                 };
 
-                // 文件夹没有元数据可看，info 只给文件
-                let info = (!is_folder).then(|| {
+                // 文件夹没有详情可看，但还是要占一个同尺寸的位：渲染一个同款
+                // invisible 按钮。visibility hidden 在 div 的 paint 里是整体短路
+                // （不插 hitbox、不注册任何监听、什么都不画），布局空间保留 ——
+                // More 按钮因此在文件行和文件夹行里始终对齐，也不用去测按钮尺寸
+                // （按钮尺寸跟主题走，手写宽高会漂）。
+                let info = if is_folder {
+                    Button::new(format!("info-{key}-placeholder"))
+                        .icon(IconName::Info)
+                        .ghost()
+                        .rounded_full()
+                        .compact()
+                        .invisible()
+                } else {
                     let panel = panel.clone();
                     let key = key.clone();
                     Button::new(format!("info-{key}-button"))
                         .tooltip("Object detail")
                         .icon(IconName::Info)
-                        .text()
+                        .ghost()
                         .rounded_full()
                         .compact()
                         .on_click(move |_, window, cx| {
@@ -1728,18 +1884,57 @@ impl TableDelegate for ObjectTableDelegate {
                                 })
                                 .ok();
                         })
-                });
+                };
+
+                // 行内"更多"菜单：单行操作。菜单项走 on_click 回调直接删本行，
+                // 不派发 DeleteAction —— 那个删的是所有勾选。
+                let more = {
+                    let panel = panel.clone();
+                    let key = key.clone();
+                    let danger = cx.theme().danger;
+
+                    Button::new(format!("more-{key}-button"))
+                        .tooltip("More")
+                        .icon(IconName::Ellipsis)
+                        .ghost()
+                        .rounded_full()
+                        .compact()
+                        .dropdown_menu(move |menu, _, _| {
+                            // dropdown_menu 的闭包是 Fn（菜单可以反复打开），
+                            // 里面不能把捕获值 move 给 on_click —— 每次开菜单现克隆
+                            let panel = panel.clone();
+                            let key = key.clone();
+
+                            menu.item(
+                                // element 闭包要 move：非 move 对 Copy 类型也是按
+                                // 引用捕获，'static 过不去
+                                PopupMenuItem::element(move |_, _| {
+                                    div().text_color(danger).child("Delete")
+                                })
+                                .icon(Icon::new(IconName::Trash).text_color(danger))
+                                .on_click(move |_, window, cx| {
+                                    panel
+                                        .update(cx, |panel, cx| {
+                                            panel.delete_row(key.clone(), is_folder, window, cx)
+                                        })
+                                        .ok();
+                                }),
+                            )
+                        })
+                };
 
                 // 左对齐：格子的左右内边距由表格自己给，所以按钮跟
                 // 上面 Name 那一列的文字是同一条竖线
                 div()
                     .size_full()
-                    .h_flex()
-                    .gap_2()
-                    .items_center()
-                    .justify_start()
-                    .child(download)
-                    .children(info)
+                    .v_flex()
+                    .justify_center()
+                    .child(
+                        div().h_flex().justify_start()
+                            .child(download)
+                            .child(info)
+                            .child(more),
+                    )
             }
             _ => div(),
         }
@@ -1913,38 +2108,37 @@ impl ObjectMetaPanel {
 
     fn render_detail(&self) -> Div {
         if let Some(meta) = &self.object_meta {
+            // 值这一列用 element 形式自己控制字号 —— 默认字号偏大。
+            // DescriptionText 只有 From<AnyElement>，div 要 into_any_element() 过一道
+            let sm = |text: String| div().text_sm().child(text).into_any_element();
+
             div().child(
-                DescriptionList::horizontal()
+                DescriptionList::new()
                     .columns(1)
-                    .item("Key", self.object_key.as_str(), 1)
-                    .item("Size", format_file_size(meta.content_length), 1)
-                    .item("ETag", meta.etag.as_str(), 1)
-                    .item(
-                        "Last modified",
-                        meta.last_modified
-                            .as_ref()
-                            .map(|s| format_datetime(s.as_str()))
-                            .unwrap_or("".to_string()),
-                        1,
-                    )
-                    .item(
-                        "Last accessed",
-                        meta.last_access_time
-                            .as_ref()
-                            .map(|s| format_datetime(s.as_str()))
-                            .unwrap_or("".to_string()),
-                        1,
-                    )
-                    .children(
-                        meta.metadata.iter().map(|(k, v)| {
-                            DescriptionItem::new(k.as_str()).value(v.as_str()).span(1)
-                        }),
-                    )
-                    .children(
-                        meta.raw_headers.iter().map(|(k, v)| {
-                            DescriptionItem::new(k.as_str()).value(v.as_str()).span(1)
-                        }),
-                    ),
+                    .children([
+                        DescriptionItem::new("Key").value(sm(self.object_key.to_string())),
+                        DescriptionItem::new("Size")
+                            .value(sm(format_file_size(meta.content_length))),
+                        DescriptionItem::new("ETag").value(sm(meta.etag.to_string())),
+                        DescriptionItem::new("Last modified").value(sm(
+                            meta.last_modified
+                                .as_ref()
+                                .map(|s| format_datetime(s.as_str()))
+                                .unwrap_or_default(),
+                        )),
+                        DescriptionItem::new("Last accessed").value(sm(
+                            meta.last_access_time
+                                .as_ref()
+                                .map(|s| format_datetime(s.as_str()))
+                                .unwrap_or_default(),
+                        )),
+                    ])
+                    .children(meta.metadata.iter().map(|(k, v)| {
+                        DescriptionItem::new(k.as_str()).value(sm(v.to_string()))
+                    }))
+                    .children(meta.raw_headers.iter().map(|(k, v)| {
+                        DescriptionItem::new(k.as_str()).value(sm(v.to_string()))
+                    })),
             )
         } else {
             div().text_center().child("Something went wrong...")

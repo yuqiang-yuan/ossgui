@@ -2,7 +2,7 @@
 name = "ossgui"
 version = "0.1.1"
 edition = "2024"
-description = "Aliyun OSS desktop client built with GPUI"
+description = "Aliyun OSS desktop client built with Rust and GPUI"
 license = "MIT"
 authors = ["Yuan YQ <yuqiang.yuan@163.com>"]
 repository = "https://github.com/yuqiang-yuan/ossgui"
@@ -45,7 +45,7 @@ name = "ossgui"
 productName = "Ossgui"
 identifier = "app.ossgui"
 category = "Utility"
-description = "Aliyun OSS desktop client built with GPUI"
+description = "Aliyun OSS desktop client built with Rust and GPUI"
 longDescription = "A cross-platform Aliyun OSS client: browse buckets and objects, upload and download files, and manage multiple accounts with credentials kept in the OS keychain."
 copyright = "Copyright (c) 2026 Yuan YQ"
 licenseFile = "LICENSE"
@@ -101,7 +101,7 @@ depends = [
 # RPM 用 cargo-generate-rpm（cargo-packager 0.11.8 不支持 RPM）
 [package.metadata.generate-rpm]
 name = "ossgui"
-summary = "Aliyun OSS desktop client built with GPUI"
+summary = "Aliyun OSS desktop client built with Rust and GPUI"
 license = "MIT"
 url = "https://github.com/yuqiang-yuan/ossgui"
 vendor = "Yuan YQ"
