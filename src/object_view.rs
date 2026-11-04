@@ -177,7 +177,7 @@ impl ObjectListPanel {
     ) -> Self {
         let search_state = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("Search")
+                .placeholder("Type to filter or enter to search by prefix")
                 .clean_on_escape()
         });
 
@@ -605,7 +605,7 @@ impl ObjectListPanel {
             .items_center()
             .child(
                 Input::new(&self.search_state)
-                    .w_64()
+                    .w_80()
                     .cleanable(true)
                     .prefix(Icon::new(IconName::Search).small()),
             )
