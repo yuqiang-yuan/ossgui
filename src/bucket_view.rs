@@ -27,7 +27,7 @@ use gpui_kit::{
 };
 
 use crate::{
-    common::{AbortOnDrop, LoadState, format_datetime, tokio_runtime},
+    common::{AbortOnDrop, LoadState, format_datetime, oss_region_map, tokio_runtime},
     main_view::MainView,
 };
 
@@ -243,6 +243,7 @@ impl TableDelegate for BucketTableDelegate {
             6 => {
                 let panel = self.bucket_list_panel.clone();
                 let name = row.name.clone();
+                let region = row.region.clone();
                 div()
                     .size_full()
                     .v_flex()
@@ -257,7 +258,7 @@ impl TableDelegate for BucketTableDelegate {
                             .on_click(move |_, window, cx| {
                                 panel
                                     .update(cx, |panel, cx| {
-                                        panel.show_bucket_detail(&name, window, cx)
+                                        panel.show_bucket_detail(&name, &region, window, cx)
                                     })
                                     .ok();
                             }),
@@ -435,10 +436,18 @@ impl BucketListPanel {
     fn show_bucket_detail(
         &mut self,
         bucket_name: &str,
+        region: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let client = self.ossclient.clone();
+        // get_bucket_info 是 bucket 级请求，必须用 bucket 所在 region 的 client。
+        // 列表用的是账号 region 的 client（GetService 任何 endpoint 都能列），
+        // 但详情跨区会报 "must be addressed using the specified endpoint"。
+        let endpoint = oss_region_map()
+            .get(region)
+            .map(|r| r.to_string())
+            .unwrap_or(format!("oss-{}.aliyuncs.com", region));
+        let client = Arc::new(self.ossclient.clone_to(region, endpoint));
         let bucket_name = bucket_name.to_string();
         let detail_view =
             cx.new(|cx| BucketDetailPanel::new(client, bucket_name.clone(), window, cx));

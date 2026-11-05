@@ -373,6 +373,14 @@ impl ObjectListPanel {
             this.update_in(cx, |this, window, cx| {
                 match result {
                     Ok(results) => {
+//                         for obj in &results.common_prefixes {
+//                             println!("{}", obj)
+//                         }
+//
+//                         for obj in &results.contents {
+//                             println!("{}", obj.key);
+//                         }
+
                         this.load_state = LoadState::Loaded;
                         this.objects_state.update(cx, |state, cx| {
                             let ListObjectsResult {
@@ -848,6 +856,7 @@ impl ObjectListPanel {
     /// `scan_upload_paths` 按混合输入处理。
     fn start_upload(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
         let main_view = self.main_view.clone();
+        let client = self.ossclient.clone();
         let bucket_name = self.bucket_name.clone();
         let prefix = self.prefix.clone();
 
@@ -883,7 +892,7 @@ impl ObjectListPanel {
             cx.update(|window, cx| {
                 main_view
                     .update(cx, move |main_view, cx| {
-                        main_view.enqueue_jobs(kinds, window, cx)
+                        main_view.enqueue_jobs(kinds, client, window, cx)
                     })
                     .ok();
             })
@@ -1001,7 +1010,7 @@ impl ObjectListPanel {
                 cx.update(|window, cx| {
                     main_view
                         .update(cx, move |main_view, cx| {
-                            main_view.enqueue_jobs(vec![kind], window, cx)
+                            main_view.enqueue_jobs(vec![kind], client, window, cx)
                         })
                         .ok();
                 })
@@ -1189,7 +1198,7 @@ impl ObjectListPanel {
             cx.update(|window, cx| {
                 main_view
                     .update(cx, move |main_view, cx| {
-                        main_view.enqueue_jobs(kinds, window, cx)
+                        main_view.enqueue_jobs(kinds, client, window, cx)
                     })
                     .ok();
             })
@@ -1261,11 +1270,13 @@ impl ObjectListPanel {
 
         let bucket_name = self.bucket_name.clone();
         let main_view = self.main_view.clone();
+        let client = self.ossclient.clone();
         let panel = cx.weak_entity();
 
         window.open_alert_dialog(cx, move |alert, _, _| {
             let bucket_name = bucket_name.clone();
             let main_view = main_view.clone();
+            let client = client.clone();
             let panel = panel.clone();
             let files = files.clone();
             let folders = folders.clone();
@@ -1277,6 +1288,9 @@ impl ObjectListPanel {
                 .ok_text("Delete")
                 .ok_variant(ButtonVariant::Danger)
                 .on_ok(move |_, window, cx| {
+                    // on_ok 是 Fn（对话框可能反复确认），client 要按次克隆
+                    let client = client.clone();
+
                     // 一个对象一个任务：每个文件、每个文件夹在面板上各占一行，
                     // 各自有独立的进度和取消。
                     // （代价是每个对象一次 HTTP 请求，批量删除那套 1000 个一批的
@@ -1298,7 +1312,7 @@ impl ObjectListPanel {
 
                     main_view
                         .update(cx, move |main_view, cx| {
-                            main_view.enqueue_jobs(kinds, window, cx)
+                            main_view.enqueue_jobs(kinds, client, window, cx)
                         })
                         .ok();
 

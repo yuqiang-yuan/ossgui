@@ -461,10 +461,16 @@ impl MainView {
             })
     }
 
-    /// 批量入队（上传一个文件夹时可能有几千个文件）
+    /// 批量入队（上传一个文件夹时可能有几千个文件）。
+    ///
+    /// `client` 由调用方给，必须是 **bucket 所在 region** 的：任务（删除/上传/
+    /// 下载）都是 bucket 级操作，用账号 region 的 client 发跨区请求会被 OSS
+    /// 拒掉（"must be addressed using the specified endpoint"）。之前这里固定
+    /// 用会话 client，本区 bucket 看不出来，跨区 bucket 列表正常、一删就报错。
     pub fn enqueue_jobs(
         &mut self,
         kinds: Vec<JobKind>,
+        client: Arc<Client>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -472,11 +478,7 @@ impl MainView {
             return;
         }
 
-        let Some(client) = self.session.client().cloned() else {
-            return; // 没有会话就没有 client，发不出任务
-        };
-
-        self.job_queue.update(cx, |state, cx| {
+        self.job_queue.update(cx, move |state, cx| {
             state.enqueue_many(kinds.into_iter().map(|kind| (kind, client.clone())), cx);
         });
 
