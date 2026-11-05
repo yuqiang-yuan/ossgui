@@ -1,7 +1,7 @@
 # Aliyun OSS 图形客户端
 
 ![License](https://img.shields.io/github/license/yuqiang-yuan/ossgui)
-![version](https://img.shields.io/github/v/release/yuqiang-yuan/ossgui)
+![version](https://img.shields.io/github/v/release/yuqiang-yuan/ossgui?_t=202611052234)
 
 [English](README.md) | [中文](README.zh-CN.md)
 
