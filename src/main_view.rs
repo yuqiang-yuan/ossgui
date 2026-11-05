@@ -24,7 +24,7 @@ use crate::{
     account::{Account, AccountPanel, AccountSettings},
     actions::{AboutAction, QuitAction},
     bucket_view::BucketListPanel,
-    common::{format_file_size, oss_region_map},
+    common::{format_file_size, mask_access_key_id, oss_region_map},
     globals::APP_NAME,
     job::{JobKind, JobPanel, JobQueue, JobsSummary, TransferSpeed},
     object_view::ObjectListPanel,
@@ -68,11 +68,23 @@ impl Session {
         }
     }
 
-    /// 状态栏上显示"现在用的是哪个账号"
+    /// 状态栏上显示"现在用的是哪个账号"。
+    ///
+    /// 优先用 remark（用户自己起的名字）；没填 remark 就退回打码后的
+    /// access key id —— 状态栏是常驻可见的，不该把密钥 id 原样摆在屏幕上
     fn account_label(&self) -> Option<String> {
         match self {
             Self::NoAccount => None,
-            Self::Active { account, .. } => Some(account.access_key_id.clone()),
+            Self::Active { account, .. } => Some(
+                account
+                    .remark
+                    .as_deref()
+                    .map(str::trim)
+                    // 添加账号时 remark 留空也会存成 Some("")，得当成没填
+                    .filter(|remark| !remark.is_empty())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| mask_access_key_id(&account.access_key_id)),
+            ),
         }
     }
 }

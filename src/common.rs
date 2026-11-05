@@ -106,6 +106,22 @@ pub fn format_count(n: u64) -> String {
     out
 }
 
+/// access key id 打码：只留头 4 位和尾 4 位，中间全换成 '*'（长度不变）。
+///
+/// 8 位及以下整个打码 —— 否则"头 4 + 尾 4"就等于原样显示，反而更糟。
+/// 用 chars 而不是字节切片，免得非 ASCII 时切出半个字符 panic。
+pub fn mask_access_key_id(key: &str) -> String {
+    let chars: Vec<char> = key.chars().collect();
+    if chars.len() <= 8 {
+        return "*".repeat(chars.len());
+    }
+
+    let head: String = chars[..4].iter().collect();
+    let tail: String = chars[chars.len() - 4..].iter().collect();
+
+    format!("{head}{}{tail}", "*".repeat(chars.len() - 8))
+}
+
 pub fn oss_region_map() -> &'static HashMap<&'static str, &'static str> {
     static MAP: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
     MAP.get_or_init(|| {
