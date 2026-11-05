@@ -50,6 +50,16 @@ jobs:
       - name: 构建
         run: cargo build --release
 
+      # appimagetool 打包时会自己去 GitHub 现下 type2 runtime，那一步偶发 504
+      # （2026-11 挂过一次）。这里带重试地下好，再用 APPIMAGETOOL_RUNTIME_FILE
+      # 指给它（appimagetool 源码里的 getenv），把那次下载彻底绕开。
+      - name: 预下载 AppImage runtime
+        run: |
+          curl -fL --retry 5 --retry-delay 5 --retry-all-errors \
+            -o "$RUNNER_TEMP/runtime-x86_64" \
+            https://github.com/AppImage/type2-runtime/releases/download/continuous/runtime-x86_64
+          echo "APPIMAGETOOL_RUNTIME_FILE=$RUNNER_TEMP/runtime-x86_64" >> "$GITHUB_ENV"
+
       - name: 打包 deb + AppImage
         run: cargo packager --release --formats deb,appimage
 
@@ -98,6 +108,14 @@ jobs:
 
       - name: 构建
         run: cargo build --release
+
+      # 同 linux-x64，只是换成 arm64 的 runtime
+      - name: 预下载 AppImage runtime
+        run: |
+          curl -fL --retry 5 --retry-delay 5 --retry-all-errors \
+            -o "$RUNNER_TEMP/runtime-aarch64" \
+            https://github.com/AppImage/type2-runtime/releases/download/continuous/runtime-aarch64
+          echo "APPIMAGETOOL_RUNTIME_FILE=$RUNNER_TEMP/runtime-aarch64" >> "$GITHUB_ENV"
 
       - name: 打包 deb + AppImage
         run: cargo packager --release --formats deb,appimage
