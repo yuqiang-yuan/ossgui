@@ -4640,6 +4640,7 @@ dependencies = [
  "gpui-fps",
  "gpui-kit",
  "gpui-pre-reqwest-client",
+ "reqwest",
  "rust-embed",
  "schemars",
  "serde",

@@ -7,6 +7,7 @@ actions!(
     [
         QuitAction,
         AboutAction,
+        CheckUpdatesAction,
         CopyAction,
         CutAction,
         PasteAction,

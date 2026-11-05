@@ -4,7 +4,7 @@ use ali_oss_rs::Client;
 use gpui_fps::fps_monitor;
 use gpui_kit::{
     App, AppContext, Context, Entity, FocusHandle, InteractiveElement, IntoElement, Menu, MenuItem,
-    ParentElement, Render, Styled, Subscription, Window,
+    ParentElement, Render, StatefulInteractiveElement, Styled, Subscription, Task, Window,
     assets::IconName,
     base::{Disableable, Placement, StyledExt, resizable_panel},
     component::{
@@ -12,6 +12,7 @@ use gpui_kit::{
         button::{Button, ButtonVariant, ButtonVariants},
         h_resizable,
         menu::{AppMenuBar, DropdownMenu, PopupMenuItem},
+        notification::NotificationType,
         progress::ProgressCircle,
         status_bar::StatusBar,
     },
@@ -22,13 +23,14 @@ use gpui_kit::{
 
 use crate::{
     account::{Account, AccountPanel, AccountSettings},
-    actions::{AboutAction, QuitAction},
+    actions::{AboutAction, CheckUpdatesAction, QuitAction},
     bucket_view::BucketListPanel,
-    common::{format_file_size, mask_access_key_id, oss_region_map},
-    globals::APP_NAME,
+    common::{AbortOnDrop, format_file_size, mask_access_key_id, oss_region_map, tokio_runtime},
+    globals::{APP_NAME, APP_REPO_URL},
     job::{JobKind, JobPanel, JobQueue, JobsSummary, TransferSpeed},
     object_view::ObjectListPanel,
     settings::AppSettings,
+    update,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,6 +109,11 @@ pub struct MainView {
     jobs_summary: JobsSummary,
     /// 整体传输速率（字节/秒），由 JobQueue 每秒重算
     transfer_speed: TransferSpeed,
+    /// 检查更新时发现的、比本地新的版本号。有值状态栏才挂提示
+    update_available: Option<String>,
+    /// 正在检查（防止手动连点，也避免和自动检查撞上）
+    update_checking: bool,
+    update_task: Task<()>,
     _subs: Vec<Subscription>,
     jobs_open: bool,
 }
@@ -206,6 +213,9 @@ impl MainView {
             jobs_summary: JobsSummary::default(),
             transfer_speed: TransferSpeed::default(),
             jobs_open: false,
+            update_available: None,
+            update_checking: false,
+            update_task: Task::ready(()), // 占位，check_updates 里会替换
             _subs: vec![job_sub],
         };
 
@@ -214,6 +224,9 @@ impl MainView {
             if let Some(account) = resume_candidate {
                 this.try_resume(account, window, cx);
             }
+
+            // 顺带看看有没有新版本（内部还有 24 小时节流和启动延迟）
+            this.check_updates(false, cx);
         });
 
         this
@@ -361,19 +374,154 @@ impl MainView {
     }
 
     fn on_about_action(&mut self, _: &AboutAction, window: &mut Window, cx: &mut Context<Self>) {
-        window.open_alert_dialog(cx, |alert, _, _| {
+        let available = self.update_available.clone();
+
+        // 闭包是 Fn（对话框可能被重绘多次）+ 'static，所以捕获的值不能 move 出去，
+        // 主题色也得用闭包自己那个 cx（外层 cx 是 &mut Context，借用逃不出去）
+        window.open_alert_dialog(cx, move |alert, _, cx| {
+            let available = available.clone();
+
             alert
                 .title(APP_NAME)
                 .description(
                     div()
                         .v_flex()
                         .gap_1()
-                        .child(format!("Version {}", env!("CARGO_PKG_VERSION")))
-                        .child("Aliyun OSS desktop client"),
+                        .child(format!("Version {}", update::current_version()))
+                        // 检查更新发现过新版本的话，顺手在这儿也提一句
+                        .when_some(available, |this, version| {
+                            this.child(format!("{version} is available"))
+                        })
+                        .child("Aliyun OSS desktop client")
+                        .child(
+                            // 普通 div 自己处理点击 —— 弹框里放 Button 视觉上太重，
+                            // 这里就是个链接的样子
+                            div()
+                                .id("about-repo-link")
+                                .text_color(cx.theme().primary)
+                                .underline()
+                                .cursor_pointer()
+                                .child(APP_REPO_URL)
+                                .on_click(|_, _, cx| cx.open_url(APP_REPO_URL)),
+                        ),
                 )
                 // 就是个信息框，只有 OK 一个按钮
                 .show_cancel(false)
                 .ok_text("OK")
+        });
+    }
+
+    fn on_check_updates_action(
+        &mut self,
+        _: &CheckUpdatesAction,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.check_updates(true, cx);
+    }
+
+    /// 检查更新。
+    ///
+    /// `manual` = 用户从菜单点的：不受 24 小时节流限制，而且不管有没有
+    /// 结果都会给个反馈。自动检查（启动时）失败就静默 —— 网络不好不是
+    /// 用户需要知道的事。
+    fn check_updates(&mut self, manual: bool, cx: &mut Context<Self>) {
+        if self.update_checking {
+            return;
+        }
+
+        if !manual {
+            let last = cx
+                .global::<AppSettings>()
+                .last_update_check
+                .unwrap_or_default();
+            if update::now_secs().saturating_sub(last) < update::CHECK_INTERVAL.as_secs() {
+                return;
+            }
+        }
+
+        self.update_checking = true;
+
+        let handle = tokio_runtime().handle().clone();
+        self.update_task = cx.spawn(async move |this, cx| {
+            // 启动时的自动检查先等等，别和首屏的 bucket 加载抢
+            if !manual {
+                cx.background_executor().timer(update::STARTUP_DELAY).await;
+            }
+
+            let join = handle.spawn(update::fetch_newer_version());
+            // GPUI Task 被 drop → future 被 drop → guard 被 drop → abort
+            let _abort_on_drop = AbortOnDrop(join.abort_handle());
+
+            let result = match join.await {
+                Ok(result) => result,
+                Err(join_err) => Err(anyhow::anyhow!("update task failed: {join_err}")),
+            };
+
+            this.update_in(cx, |view, window, cx| {
+                view.update_checking = false;
+
+                {
+                    let settings = cx.global_mut::<AppSettings>();
+                    settings.last_update_check = Some(update::now_secs());
+                    settings.save();
+                }
+
+                match result {
+                    Ok(Some(version)) => {
+                        view.update_available = Some(version.clone());
+
+                        // 同一个版本只弹一次，不然每次启动都弹
+                        let notified = cx
+                            .global::<AppSettings>()
+                            .last_notified_version
+                            .as_deref()
+                            == Some(version.as_str());
+                        if !notified {
+                            let settings = cx.global_mut::<AppSettings>();
+                            settings.last_notified_version = Some(version.clone());
+                            settings.save();
+
+                            window.push_notification(
+                                (
+                                    NotificationType::Info,
+                                    format!("{APP_NAME} {version} is available"),
+                                ),
+                                cx,
+                            );
+                        }
+                    }
+                    Ok(None) => {
+                        view.update_available = None;
+                        if manual {
+                            window.push_notification(
+                                (
+                                    NotificationType::Info,
+                                    format!(
+                                        "You're on the latest version ({})",
+                                        update::current_version()
+                                    ),
+                                ),
+                                cx,
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        if manual {
+                            window.push_notification(
+                                (
+                                    NotificationType::Error,
+                                    format!("Update check failed: {e}"),
+                                ),
+                                cx,
+                            );
+                        }
+                    }
+                }
+
+                cx.notify();
+            })
+            .ok();
         });
     }
 
@@ -516,6 +664,7 @@ impl Render for MainView {
             .v_flex()
             .on_action(cx.listener(Self::on_quit_action))
             .on_action(cx.listener(Self::on_about_action))
+            .on_action(cx.listener(Self::on_check_updates_action))
             .child(
                 TitleBar::new()
                     // X 按钮默认是 window.remove_window()，绕过了 on_window_should_close，
@@ -648,9 +797,14 @@ impl Render for MainView {
                         div()
                             .h_flex()
                             .items_center()
+                            .gap_2()
                             .text_sm()
                             .text_color(cx.theme().muted_foreground)
-                            .when_some(account_label, |this, label| this.child(label)),
+                            .when_some(account_label, |this, label| this.child(label))
+                            // 有新版本就挂在账号名右边，点一下跳 Releases
+                            .when_some(self.update_available.clone(), |this, version| {
+                                this.child(update_chip(version))
+                            }),
                     )
                     .right(
                         div()
@@ -684,6 +838,7 @@ fn build_menus() -> Vec<Menu> {
                 name: APP_NAME.into(),
                 items: vec![
                     MenuItem::action(about_label, AboutAction),
+                    MenuItem::action("Check for Updates…", CheckUpdatesAction),
                     MenuItem::separator(),
                     MenuItem::action("Quit", QuitAction),
                 ],
@@ -707,11 +862,28 @@ fn build_menus() -> Vec<Menu> {
             },
             Menu {
                 name: "Help".into(),
-                items: vec![MenuItem::action(about_label, AboutAction)],
+                items: vec![
+                    MenuItem::action(about_label, AboutAction),
+                    MenuItem::action("Check for Updates…", CheckUpdatesAction),
+                ],
                 disabled: false,
             },
         ]
     }
+}
+
+/// 状态栏上的"有新版本"入口：点一下打开 Releases 页面。
+///
+/// 只是个提示 + 跳转，不下载也不安装。tooltip 往上弹 —— 状态栏贴着窗口底边
+fn update_chip(version: String) -> impl IntoElement {
+    Button::new("update-available-button")
+        .icon(IconName::CircleFadingArrowUp)
+        .label(format!("New version {version}"))
+        .text()
+        .text_sm()
+        .tooltip("Open the releases page")
+        .tooltip_placement(Placement::Top)
+        .on_click(|_, _, cx| cx.open_url(update::RELEASES_URL))
 }
 
 /// Add a button to switch theme (dark/light)

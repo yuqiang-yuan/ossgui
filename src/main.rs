@@ -8,6 +8,7 @@ mod object_view;
 mod settings;
 mod job;
 mod account;
+mod update;
 
 #[cfg(target_os = "linux")]
 use gpui_kit::WindowDecorations;

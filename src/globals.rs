@@ -1,6 +1,9 @@
 pub static APP_ID: &str = "app.ossgui";
 pub static APP_NAME: &str = "Ossgui";
 
+/// 项目主页。About 对话框里点一下用系统默认浏览器打开
+pub static APP_REPO_URL: &str = "https://github.com/yuqiang-yuan/ossgui";
+
 /// Linux 窗口的 app_id（Wayland 的 app_id / X11 的 WM_CLASS）。
 ///
 /// 必须等于打包时生成的桌面文件名。cargo-packager 固定把它命名成

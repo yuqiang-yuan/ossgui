@@ -26,6 +26,10 @@ pub struct AppSettings {
     /// bucket 表被隐藏的列（Columns 按钮）。空/None = 全显示。
     /// 存列 key 不存下标，列增删后老配置还能对上
     pub bucket_hidden_columns: Option<HashSet<String>>,
+    /// 上次检查更新的时间（unix 秒）。自动检查 24 小时最多一次
+    pub last_update_check: Option<u64>,
+    /// 已经弹过提示的版本号 —— 同一个版本只提醒一次，不然每次启动都弹
+    pub last_notified_version: Option<String>,
 }
 
 impl Global for AppSettings {}
@@ -74,6 +78,8 @@ impl Default for AppSettings {
             bucket_column_widths: None,
             object_column_widths: None,
             bucket_hidden_columns: None,
+            last_update_check: None,
+            last_notified_version: None,
         }
     }
 }

@@ -22,6 +22,17 @@ dotenvy = "0.15.7"
 gpui-fps = "0.9.0"
 gpui-kit = "0.9.0"
 gpui-pre-reqwest-client = "0.3.11"
+# 检查更新时直接发 HTTP 请求用。
+#
+# 树里本来就有两份 reqwest（上游的给 ali-oss-rs 用，gpui 自己那份是改名过的
+# gpui-pre-reqwest），所以加这个直接依赖不增加二进制体积。
+#
+# default-features 必须关：reqwest 的默认特性里有 default-tls（→ native-tls
+# → OpenSSL），打开就把 rust-tls 换来的"不依赖 libssl"又还回去了。
+# 一个 feature 也不用加 —— 特性是全局求并集的，ali-oss-rs 已经开了
+# rustls-tls-webpki-roots + stream，HTTPS 直接能用（解析 JSON 用 serde_json，
+# 不开 reqwest 的 json 特性）。
+reqwest = { version = "0.12", default-features = false }
 rust-embed = "8.12.0"
 schemars = "1.2.2"
 serde = { version = "1.0.229", features = ["derive"] }
