@@ -11,7 +11,8 @@ use ali_oss_rs::{
 };
 use gpui_kit::{
     Anchor, AnyElement, App, AppContext, Context, Div, Entity, Global, Hsla, IntoElement,
-    ParentElement, Render, SharedString, Styled, Subscription, Task, TextAlign, WeakEntity, Window,
+    ParentElement, Pixels, Render, SharedString, Styled, Subscription, Task, TextAlign, WeakEntity,
+    Window,
     assets::IconName,
     base::{
         Disableable, Placement, StyledExt,
@@ -23,6 +24,7 @@ use gpui_kit::{
         description_list::{DescriptionItem, DescriptionList},
         hover_card::HoverCard,
         input::Input,
+        menu::{DropdownMenu, PopupMenuItem},
         notification::NotificationType,
         progress::ProgressCircle,
         table::{Column, ColumnSort, DataTable, TableDelegate, TableState, TableEvent},
@@ -96,11 +98,21 @@ fn stat_block(label: &'static str, value: String, accent: Hsla) -> Div {
 #[derive(Default)]
 struct StatTotals {
     objects: u64,
+    total: u64,
     standard: u64,
     infrequent: u64,
     archive: u64,
     cold_archive: u64,
     deep_cold_archive: u64,
+}
+
+/// 五种存储类型的用量加总（Total 列/块用）
+fn total_storage(s: &BucketStat) -> u64 {
+    s.standard_storage
+        + s.infrequent_access_storage
+        + s.archive_storage
+        + s.cold_archive_storage
+        + s.deep_cold_archive_storage
 }
 
 /// 统计单元格的共同外壳：右对齐 + 垂直居中 + text_sm
@@ -113,6 +125,86 @@ fn stat_cell_div(text: String) -> Div {
         .text_align(TextAlign::Right)
         .child(text)
 }
+
+/// bucket 表所有列的定义（完整列表，未按可见性过滤）。
+///
+/// 隐藏列的做法是**按 key 过滤这个列表**再让 TableState::refresh 重建表头/单元格，
+/// 所以 render_td / 排序都按列 key 分发、不看列下标 —— 下标会随隐藏列漂移
+fn bucket_columns() -> Vec<Column> {
+    vec![
+        Column::new("ix", "#")
+            .width(px(40.0))
+            .text_right()
+            .movable(false)
+            .resizable(false),
+        Column::new("icon", "")
+            .width(px(24.0))
+            .movable(false)
+            .resizable(false),
+        Column::new("name", "Bucket")
+            .width(px(180.0))
+            .sortable()
+            .movable(false),
+        Column::new("region", "Region")
+            .width(px(140.0))
+            .sortable()
+            .movable(false),
+        Column::new("storage_type", "Storage type")
+            .width(px(120.0))
+            .movable(false),
+        // 统计列（get_bucket_stat）：Objects 是对象总数，Total 是五种类型
+        // 存储量的加总，其余五列是该存储类型的存储量
+        // （human readable，悬浮显示精确字节）。数值右对齐
+        Column::new("object_count", "Objects")
+            .width(px(100.0))
+            .text_right()
+            .movable(false)
+            .sortable(),
+        Column::new("total_size", "Total")
+            .width(px(100.0))
+            .text_right()
+            .movable(false)
+            .sortable(),
+        Column::new("standard", "Standard")
+            .width(px(100.0))
+            .text_right()
+            .movable(false)
+            .sortable(),
+        Column::new("infrequent", "Infrequent")
+            .width(px(100.0))
+            .text_right()
+            .movable(false)
+            .sortable(),
+        Column::new("archive", "Archive")
+            .width(px(100.0))
+            .text_right()
+            .movable(false)
+            .sortable(),
+        Column::new("cold_archive", "Cold Archive")
+            .width(px(120.0))
+            .text_right()
+            .movable(false)
+            .sortable(),
+        Column::new("deep_cold_archive", "Deep Cold Archive")
+            .width(px(150.0))
+            .text_right()
+            .movable(false)
+            .sortable(),
+        Column::new("actions", "").width(px(60.0)).movable(false),
+    ]
+}
+
+/// Columns 按钮里可勾选显示/隐藏的列（列 key, 表头名）。
+/// 只放统计列：其余列是表格的骨架（名称、操作、序号），藏掉没意义
+const TOGGLEABLE_COLUMNS: [(&str, &str); 7] = [
+    ("object_count", "Objects"),
+    ("total_size", "Total"),
+    ("standard", "Standard"),
+    ("infrequent", "Infrequent"),
+    ("archive", "Archive"),
+    ("cold_archive", "Cold Archive"),
+    ("deep_cold_archive", "Deep Cold Archive"),
+];
 
 pub struct BucketTableDelegate {
     /// This is all data
@@ -135,62 +227,9 @@ impl BucketTableDelegate {
     pub fn new(
         bucket_list_panel: WeakEntity<BucketListPanel>,
         saved_widths: Option<HashMap<String, f32>>,
+        hidden_columns: &HashSet<String>,
     ) -> Self {
-        let mut columns = vec![
-                Column::new("ix", "#")
-                    .width(px(40.0))
-                    .text_right()
-                    .movable(false)
-                    .resizable(false),
-                Column::new("icon", "")
-                    .width(px(24.0))
-                    .movable(false)
-                    .resizable(false),
-                Column::new("name", "Bucket")
-                    .width(px(180.0))
-                    .sortable()
-                    .movable(false),
-                Column::new("region", "Region")
-                    .width(px(140.0))
-                    .sortable()
-                    .movable(false),
-                Column::new("storage_type", "Storage type")
-                    .width(px(120.0))
-                    .movable(false),
-                // 统计列（get_bucket_stat）：Objects 是对象总数，其余五列是该存储
-                // 类型的存储量（human readable，悬浮显示精确字节）。数值右对齐
-                Column::new("object_count", "Objects")
-                    .width(px(100.0))
-                    .text_right()
-                    .movable(false)
-                    .sortable(),
-                Column::new("standard", "Standard")
-                    .width(px(100.0))
-                    .text_right()
-                    .movable(false)
-                    .sortable(),
-                Column::new("infrequent", "Infrequent")
-                    .width(px(100.0))
-                    .text_right()
-                    .movable(false)
-                    .sortable(),
-                Column::new("archive", "Archive")
-                    .width(px(100.0))
-                    .text_right()
-                    .movable(false)
-                    .sortable(),
-                Column::new("cold_archive", "Cold Archive")
-                    .width(px(120.0))
-                    .text_right()
-                    .movable(false)
-                    .sortable(),
-                Column::new("deep_cold_archive", "Deep Cold Archive")
-                    .width(px(150.0))
-                    .text_right()
-                    .movable(false)
-                    .sortable(),
-                Column::new("actions", "").width(px(60.0)).movable(false),
-            ];
+        let mut columns = bucket_columns();
 
         // 恢复用户调整过的列宽（按列 key 匹配，列增删不受影响）
         if let Some(widths) = &saved_widths {
@@ -200,6 +239,9 @@ impl BucketTableDelegate {
                 }
             }
         }
+
+        // 恢复用户隐藏的列（Columns 按钮）
+        columns.retain(|col| !hidden_columns.contains(col.key.as_ref()));
 
         Self {
             rows: Vec::new(),
@@ -230,6 +272,30 @@ impl BucketTableDelegate {
         self.recompute();
     }
 
+    /// 切换列的显示/隐藏：按当前宽度重建列列表，再摘掉隐藏的列。
+    ///
+    /// 排序状态一并清掉 —— 列下标变了，之前的排序键已经不指向同一列了
+    fn set_hidden_columns(&mut self, hidden: &HashSet<String>) {
+        // 宽度以 delegate 为准（拖拽后已写回），这样隐藏/显示来回切不会丢宽度
+        let widths: HashMap<SharedString, Pixels> = self
+            .columns
+            .iter()
+            .map(|col| (col.key.clone(), col.width))
+            .collect();
+
+        let mut columns = bucket_columns();
+        for col in &mut columns {
+            if let Some(width) = widths.get(&col.key) {
+                col.width = *width;
+            }
+        }
+        columns.retain(|col| !hidden.contains(col.key.as_ref()));
+
+        self.columns = columns;
+        self.current_sort = None;
+        self.recompute();
+    }
+
     /// Objects 列：对象总数
     fn stat_count_cell(&self, bucket: &str) -> Div {
         let text = match self.stats.get(bucket) {
@@ -246,7 +312,7 @@ impl BucketTableDelegate {
     ///
     /// 垂直居中放在**外层** div 上：HoverCard 的 trigger 会被包一层无高度的
     /// `div#trigger`，size_full 的单元格放在里面会失效、贴顶
-    fn stat_size_cell(&self, bucket: &str, col_ix: usize, pick: fn(&BucketStat) -> u64) -> AnyElement {
+    fn stat_size_cell(&self, bucket: &str, col_key: &str, pick: fn(&BucketStat) -> u64) -> AnyElement {
         let Some(bytes) = self.stats.get(bucket).map(pick) else {
             return stat_cell_div("-".to_string()).into_any_element();
         };
@@ -256,7 +322,9 @@ impl BucketTableDelegate {
             .v_flex()
             .justify_center()
             .child(
-                HoverCard::new((SharedString::from(bucket), col_ix))
+                // id 用 bucket + 列 key：同一行里各列各一张卡片，
+                // 用列 key 而不是下标，隐藏列后也不会串
+                HoverCard::new(SharedString::from(format!("{bucket}:{col_key}")))
                     // 这几列靠右，卡片往左下展开才不会顶出窗口
                     .anchor(Anchor::TopRight)
                     .trigger(
@@ -286,6 +354,15 @@ impl BucketTableDelegate {
             .and_then(|ix| self.rows.get(*ix))
     }
 
+    /// 统计列的排序键（按 rows 的原始顺序）。统计还没到的按 0 排
+    /// —— 列表刚出来时它们都在路上
+    fn stat_sort_keys(&self, pick: fn(&BucketStat) -> u64) -> Vec<u64> {
+        self.rows
+            .iter()
+            .map(|b| self.stats.get(&b.name).map(pick).unwrap_or(0))
+            .collect()
+    }
+
     /// 唯一的派生状态重算入口。
     /// filtered_indexes = f(rows, search, current_sort)，任何输入变化后调用一次。
     fn recompute(&mut self) {
@@ -303,36 +380,32 @@ impl BucketTableDelegate {
         };
         let desc = sort == ColumnSort::Descending;
 
-        // 统计列（5..=10）的排序键提前取出来：sort_by 的闭包已经可变借用了
-        // filtered_indexes，闭包里不能再整借 self 调方法，只能直接读字段
-        let stat_keys: Vec<u64> = match col_ix {
-            5..=10 => {
-                let pick: fn(&BucketStat) -> u64 = match col_ix {
-                    5 => |s| s.object_count,
-                    6 => |s| s.standard_storage,
-                    7 => |s| s.infrequent_access_storage,
-                    8 => |s| s.archive_storage,
-                    9 => |s| s.cold_archive_storage,
-                    _ => |s| s.deep_cold_archive_storage,
-                };
+        // 同样按列 key 分发（列可被隐藏，下标不可靠）
+        let col_key = self.columns.get(col_ix).map(|col| col.key.clone());
 
-                // 统计还没到的按 0 排（列表刚出来时它们都在路上）
-                self.rows
-                    .iter()
-                    .map(|b| self.stats.get(&b.name).map(pick).unwrap_or(0))
-                    .collect()
+        // 统计列的排序键提前取出来：sort_by 的闭包已经可变借用了
+        // filtered_indexes，闭包里不能再整借 self 调方法，只能直接读字段
+        let stat_keys: Option<Vec<u64>> = match col_key.as_deref() {
+            Some("object_count") => Some(self.stat_sort_keys(|s| s.object_count)),
+            Some("total_size") => Some(self.stat_sort_keys(total_storage)),
+            Some("standard") => Some(self.stat_sort_keys(|s| s.standard_storage)),
+            Some("infrequent") => Some(self.stat_sort_keys(|s| s.infrequent_access_storage)),
+            Some("archive") => Some(self.stat_sort_keys(|s| s.archive_storage)),
+            Some("cold_archive") => Some(self.stat_sort_keys(|s| s.cold_archive_storage)),
+            Some("deep_cold_archive") => {
+                Some(self.stat_sort_keys(|s| s.deep_cold_archive_storage))
             }
-            _ => Vec::new(),
+            _ => None,
         };
 
         self.filtered_indexes.sort_by(|&a, &b| {
-            // 列号：0=#, 1=icon, 2=Bucket, 3=Region, 4=Storage type,
-            // 5..=10=统计列, 11=actions
-            let o = match col_ix {
-                2 => self.rows[a].name.cmp(&self.rows[b].name),
-                3 => self.rows[a].region.cmp(&self.rows[b].region),
-                5..=10 => stat_keys[a].cmp(&stat_keys[b]),
-                _ => std::cmp::Ordering::Equal,
+            let o = match col_key.as_deref() {
+                Some("name") => self.rows[a].name.cmp(&self.rows[b].name),
+                Some("region") => self.rows[a].region.cmp(&self.rows[b].region),
+                _ => match &stat_keys {
+                    Some(keys) => keys[a].cmp(&keys[b]),
+                    None => std::cmp::Ordering::Equal,
+                },
             };
             if desc { o.reverse() } else { o }
         });
@@ -378,8 +451,12 @@ impl TableDelegate for BucketTableDelegate {
             return div().into_any_element();
         };
 
-        match col_ix {
-            0 => div()
+        // 按列 key 分发（不是列下标）：Columns 按钮能隐藏列，下标会漂移。
+        // key 是 SharedString，克隆一下便宜，也免得借住 self.columns
+        let col_key = self.columns[col_ix].key.clone();
+
+        match col_key.as_ref() {
+            "ix" => div()
                 .size_full()
                 .h_flex()
                 .items_end()
@@ -392,7 +469,7 @@ impl TableDelegate for BucketTableDelegate {
                         .child(format!("{}", row_ix + 1)),
                 )
                 .into_any_element(),
-            1 => div()
+            "icon" => div()
                 .size_full()
                 .h_flex()
                 .items_center()
@@ -403,7 +480,7 @@ impl TableDelegate for BucketTableDelegate {
                         .text_color(get_color(row, cx)),
                 )
                 .into_any_element(),
-            2 => {
+            "name" => {
                 let panel = self.bucket_list_panel.clone();
                 let name = row.name.clone();
                 let region = row.region.clone();
@@ -429,27 +506,34 @@ impl TableDelegate for BucketTableDelegate {
                     )
                     .into_any_element()
             }
-            3 => div()
+            "region" => div()
                 .size_full()
                 .text_sm()
                 .v_flex()
                 .justify_center()
                 .child(row.region.clone())
                 .into_any_element(),
-            4 => div()
+            "storage_type" => div()
                 .size_full()
                 .text_sm()
                 .v_flex()
                 .justify_center()
                 .child(row.storage_class.to_string())
                 .into_any_element(),
-            5 => self.stat_count_cell(&row.name).into_any_element(),
-            6 => self.stat_size_cell(&row.name, 6, |s| s.standard_storage),
-            7 => self.stat_size_cell(&row.name, 7, |s| s.infrequent_access_storage),
-            8 => self.stat_size_cell(&row.name, 8, |s| s.archive_storage),
-            9 => self.stat_size_cell(&row.name, 9, |s| s.cold_archive_storage),
-            10 => self.stat_size_cell(&row.name, 10, |s| s.deep_cold_archive_storage),
-            11 => {
+            "object_count" => self.stat_count_cell(&row.name).into_any_element(),
+            "total_size" => self.stat_size_cell(&row.name, "total_size", total_storage),
+            "standard" => self.stat_size_cell(&row.name, "standard", |s| s.standard_storage),
+            "infrequent" => {
+                self.stat_size_cell(&row.name, "infrequent", |s| s.infrequent_access_storage)
+            }
+            "archive" => self.stat_size_cell(&row.name, "archive", |s| s.archive_storage),
+            "cold_archive" => {
+                self.stat_size_cell(&row.name, "cold_archive", |s| s.cold_archive_storage)
+            }
+            "deep_cold_archive" => {
+                self.stat_size_cell(&row.name, "deep_cold_archive", |s| s.deep_cold_archive_storage)
+            }
+            "actions" => {
                 let panel = self.bucket_list_panel.clone();
                 let name = row.name.clone();
                 let region = row.region.clone();
@@ -545,11 +629,20 @@ impl BucketListPanel {
 
         let this_weak = cx.weak_entity();
         let saved_widths = cx.global::<AppSettings>().bucket_column_widths.clone();
+        let hidden_columns = cx
+            .global::<AppSettings>()
+            .bucket_hidden_columns
+            .clone()
+            .unwrap_or_default();
         let buckets_state = cx.new(|cx| {
-            TableState::new(BucketTableDelegate::new(this_weak, saved_widths), window, cx)
-                .row_selectable(true)
-                .col_selectable(false)
-                .cell_selectable(false)
+            TableState::new(
+                BucketTableDelegate::new(this_weak, saved_widths, &hidden_columns),
+                window,
+                cx,
+            )
+            .row_selectable(true)
+            .col_selectable(false)
+            .cell_selectable(false)
         });
 
         // 用户拖完列宽（或双击 fit）时把当前宽度存进设置，下次打开恢复
@@ -558,17 +651,28 @@ impl BucketListPanel {
                 return;
             };
 
-            // 列 key → 宽度（事件给的是按列序的 Vec）
-            let delegate = state.read(cx).delegate();
-            let map: HashMap<String, f32> = delegate
-                .columns
-                .iter()
-                .zip(widths.iter())
-                .map(|(col, w)| (col.key.to_string(), f32::from(*w)))
-                .collect();
+            // 列 key → 宽度（事件给的是按列序的 Vec）。
+            // 顺手写回 delegate 的列：隐藏/显示列时要拿它当宽度基准
+            let map: HashMap<String, f32> = state.update(cx, |state, _| {
+                let delegate = state.delegate_mut();
+                for (col, width) in delegate.columns.iter_mut().zip(widths.iter()) {
+                    col.width = *width;
+                }
 
+                delegate
+                    .columns
+                    .iter()
+                    .zip(widths.iter())
+                    .map(|(col, w)| (col.key.to_string(), f32::from(*w)))
+                    .collect()
+            });
+
+            // 合并而不是覆盖：当前隐藏着的列不在 map 里，不能把它们的宽度冲掉
             let settings = cx.global_mut::<AppSettings>();
-            settings.bucket_column_widths = Some(map);
+            settings
+                .bucket_column_widths
+                .get_or_insert_with(HashMap::new)
+                .extend(map);
             settings.save();
         });
 
@@ -794,6 +898,7 @@ impl BucketListPanel {
         for b in &delegate.rows {
             if let Some(s) = delegate.stats.get(&b.name) {
                 t.objects += s.object_count;
+                t.total += total_storage(s);
                 t.standard += s.standard_storage;
                 t.infrequent += s.infrequent_access_storage;
                 t.archive += s.archive_storage;
@@ -834,6 +939,9 @@ impl BucketListPanel {
             .h_flex()
             .gap_2()
             .child(stat_block("Objects", count(t.objects), cx.theme().foreground))
+            // Total 和 Objects 一样是"合计"不是存储类型，用中性色；
+            // 五个类型块才是语义色梯度
+            .child(stat_block("Total", size(t.total), cx.theme().foreground))
             .child(stat_block("Standard", size(t.standard), cx.theme().blue))
             .child(stat_block("Infrequent", size(t.infrequent), cx.theme().cyan))
             .child(stat_block("Archive", size(t.archive), cx.theme().yellow))
@@ -847,6 +955,65 @@ impl BucketListPanel {
                 size(t.deep_cold_archive),
                 cx.theme().red,
             ))
+    }
+}
+
+impl BucketListPanel {
+    /// 勾选/取消勾选一个列：写进设置，并让表格按新的列集合重建
+    fn toggle_column(&mut self, key: &str, cx: &mut Context<Self>) {
+        let hidden = {
+            let settings = cx.global_mut::<AppSettings>();
+            let hidden = settings.bucket_hidden_columns.get_or_insert_with(HashSet::new);
+            if !hidden.remove(key) {
+                hidden.insert(key.to_string());
+            }
+            let hidden = hidden.clone();
+            settings.save();
+
+            hidden
+        };
+
+        self.buckets_state.update(cx, |state, cx| {
+            state.delegate_mut().set_hidden_columns(&hidden);
+            // 列集合变了，让 TableState 重新读一遍 delegate 的列（表头/单元格都按它布局）
+            state.refresh(cx);
+        });
+
+        cx.notify();
+    }
+
+    /// Columns 按钮：勾选控制统计列的显示/隐藏。
+    /// 菜单闭包是 Fn（每次打开都会重跑），所以在里面现读设置拿勾选态
+    fn columns_button(&self, panel: WeakEntity<Self>) -> impl IntoElement {
+        Button::new("bucket-columns-button")
+            .icon(IconName::Menu)
+            .label("Columns")
+            .tooltip("Show / hide columns")
+            .dropdown_menu(move |menu, _, cx| {
+                let hidden = cx
+                    .global::<AppSettings>()
+                    .bucket_hidden_columns
+                    .clone()
+                    .unwrap_or_default();
+
+                TOGGLEABLE_COLUMNS
+                    .iter()
+                    .fold(menu, |menu, (key, label)| {
+                        // 闭包是 Fn，捕获值不能 move 进 on_click，每轮现克隆
+                        let panel = panel.clone();
+                        let key = *key;
+
+                        menu.item(
+                            PopupMenuItem::new(*label)
+                                .checked(!hidden.contains(key))
+                                .on_click(move |_, _, cx| {
+                                    panel
+                                        .update(cx, |panel, cx| panel.toggle_column(key, cx))
+                                        .ok();
+                                }),
+                        )
+                    })
+            })
     }
 }
 
@@ -897,7 +1064,8 @@ impl Render for BucketListPanel {
                             .on_click(cx.listener(|view, _, _, cx| {
                                 view.load_buckets(true, cx);
                             })),
-                    ),
+                    )
+                    .child(self.columns_button(cx.weak_entity())),
             )
             .child(
                 DataTable::new(&self.buckets_state)

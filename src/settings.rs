@@ -1,11 +1,17 @@
-use std::{collections::HashMap, fs};
+use std::{
+    collections::{HashMap, HashSet},
+    fs,
+};
 
 use gpui_kit::Global;
 use serde::{Deserialize, Serialize};
 
 use crate::globals::APP_ID;
 
+/// `serde(default)`：老配置文件里缺字段（新版本加的）时按 Default 补，
+/// 而不是整个反序列化失败 —— 那样会把用户已存的窗口大小、列宽一起清掉
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AppSettings {
     pub is_dark: Option<bool>,
     pub window_width: Option<f32>,
@@ -17,6 +23,9 @@ pub struct AppSettings {
     pub bucket_column_widths: Option<HashMap<String, f32>>,
     /// object 表同上
     pub object_column_widths: Option<HashMap<String, f32>>,
+    /// bucket 表被隐藏的列（Columns 按钮）。空/None = 全显示。
+    /// 存列 key 不存下标，列增删后老配置还能对上
+    pub bucket_hidden_columns: Option<HashSet<String>>,
 }
 
 impl Global for AppSettings {}
@@ -64,6 +73,7 @@ impl Default for AppSettings {
             font_size: Some(16.0),
             bucket_column_widths: None,
             object_column_widths: None,
+            bucket_hidden_columns: None,
         }
     }
 }
