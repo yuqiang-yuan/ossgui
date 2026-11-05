@@ -1,14 +1,17 @@
-use std::sync::Arc;
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use ali_oss_rs::{
     Client,
     bucket::BucketOperations,
-    bucket_common::{BucketDetail, BucketSummary, ListBucketsOptions, ListBucketsResult},
+    bucket_common::{BucketDetail, BucketStat, BucketSummary, ListBucketsOptions, ListBucketsResult},
     common::StorageClass,
 };
 use gpui_kit::{
-    App, AppContext, Context, Div, Entity, Hsla, IntoElement, ParentElement, Render, Styled,
-    Subscription, Task, WeakEntity, Window,
+    Anchor, AnyElement, App, AppContext, Context, Div, Entity, Global, Hsla, IntoElement,
+    ParentElement, Render, SharedString, Styled, Subscription, Task, TextAlign, WeakEntity, Window,
     assets::IconName,
     base::{
         Disableable, Placement, StyledExt,
@@ -18,6 +21,7 @@ use gpui_kit::{
         ActiveTheme, Icon, Sizable, WindowExt,
         button::{Button, ButtonVariants},
         description_list::{DescriptionItem, DescriptionList},
+        hover_card::HoverCard,
         input::Input,
         notification::NotificationType,
         progress::ProgressCircle,
@@ -27,13 +31,95 @@ use gpui_kit::{
 };
 
 use crate::{
-    common::{AbortOnDrop, LoadState, format_datetime, oss_region_map, tokio_runtime},
+    common::{
+        AbortOnDrop, LoadState, format_count, format_datetime, format_file_size, oss_endpoint,
+        tokio_runtime,
+    },
     main_view::MainView,
 };
+
+/// bucket 统计信息的应用级缓存：bucket 名 → 统计。
+///
+/// bucket 名在 OSS 里全局唯一，直接当 key。命中就不发请求；
+/// 刷新按钮清掉它，重新拉。统计接口失败静默，列里显示 "-"。
+#[derive(Default)]
+pub struct BucketStatsCache {
+    stats: std::collections::HashMap<String, BucketStat>,
+}
+
+impl Global for BucketStatsCache {}
+
+impl BucketStatsCache {
+    fn get(&self, bucket: &str) -> Option<&BucketStat> {
+        self.stats.get(bucket)
+    }
+
+    fn insert(&mut self, bucket: String, stat: BucketStat) {
+        self.stats.insert(bucket, stat);
+    }
+
+    fn clear(&mut self) {
+        self.stats.clear();
+    }
+
+    /// 给 delegate 用的整体快照
+    fn snapshot(&self) -> HashMap<String, BucketStat> {
+        self.stats.clone()
+    }
+}
+
+/// 顶部统计块：label + 值。背景/边框 = 主色低透明度叠在主题底色上，
+/// 深浅色模式都自适应（不做硬编码颜色）
+fn stat_block(label: &'static str, value: String, accent: Hsla) -> Div {
+    div()
+        .flex_1()
+        .min_w_0()
+        .px_3()
+        .py_2()
+        .rounded_md()
+        .bg(accent.opacity(0.10))
+        .border_1()
+        .border_color(accent.opacity(0.25))
+        .v_flex()
+        .gap_1()
+        .child(
+            div()
+                .text_sm()
+                .text_color(accent.opacity(0.85))
+                .child(label),
+        )
+        .child(div().text_xl().text_color(accent).child(value))
+}
+
+/// 顶部统计块的合计：遍历已加载 bucket 的统计缓存求和
+#[derive(Default)]
+struct StatTotals {
+    objects: u64,
+    standard: u64,
+    infrequent: u64,
+    archive: u64,
+    cold_archive: u64,
+    deep_cold_archive: u64,
+}
+
+/// 统计单元格的共同外壳：右对齐 + 垂直居中 + text_sm
+fn stat_cell_div(text: String) -> Div {
+    div()
+        .size_full()
+        .text_sm()
+        .v_flex()
+        .justify_center()
+        .text_align(TextAlign::Right)
+        .child(text)
+}
 
 pub struct BucketTableDelegate {
     /// This is all data
     rows: Vec<BucketSummary>,
+
+    /// 统计缓存快照：渲染和排序都读它。列表加载时从全局缓存填充，
+    /// 统计异步到达时增量更新（并重排序）
+    stats: HashMap<String, BucketStat>,
 
     /// This are rows after applying filter
     filtered_indexes: Vec<usize>,
@@ -48,12 +134,13 @@ impl BucketTableDelegate {
     pub fn new(bucket_list_panel: WeakEntity<BucketListPanel>) -> Self {
         Self {
             rows: Vec::new(),
+            stats: HashMap::new(),
             filtered_indexes: Vec::new(),
             loading: true, // 首屏直接骨架屏
             bucket_list_panel,
             columns: vec![
                 Column::new("ix", "#")
-                    .width(px(60.0))
+                    .width(px(40.0))
                     .text_right()
                     .movable(false)
                     .resizable(false),
@@ -62,20 +149,48 @@ impl BucketTableDelegate {
                     .movable(false)
                     .resizable(false),
                 Column::new("name", "Bucket")
-                    .width(px(260.0))
+                    .width(px(180.0))
                     .sortable()
                     .movable(false),
                 Column::new("region", "Region")
-                    .width(px(160.0))
-                    .sortable()
-                    .movable(false),
-                Column::new("created_at", "Created at")
-                    .width(px(160.0))
+                    .width(px(140.0))
                     .sortable()
                     .movable(false),
                 Column::new("storage_type", "Storage type")
                     .width(px(120.0))
                     .movable(false),
+                // 统计列（get_bucket_stat）：Objects 是对象总数，其余五列是该存储
+                // 类型的存储量（human readable，悬浮显示精确字节）。数值右对齐
+                Column::new("object_count", "Objects")
+                    .width(px(100.0))
+                    .text_right()
+                    .movable(false)
+                    .sortable(),
+                Column::new("standard", "Standard")
+                    .width(px(100.0))
+                    .text_right()
+                    .movable(false)
+                    .sortable(),
+                Column::new("infrequent", "Infrequent")
+                    .width(px(100.0))
+                    .text_right()
+                    .movable(false)
+                    .sortable(),
+                Column::new("archive", "Archive")
+                    .width(px(100.0))
+                    .text_right()
+                    .movable(false)
+                    .sortable(),
+                Column::new("cold_archive", "Cold Archive")
+                    .width(px(120.0))
+                    .text_right()
+                    .movable(false)
+                    .sortable(),
+                Column::new("deep_cold_archive", "Deep Cold Archive")
+                    .width(px(150.0))
+                    .text_right()
+                    .movable(false)
+                    .sortable(),
                 Column::new("actions", "").width(px(60.0)).movable(false),
             ],
             search: String::new(),
@@ -87,6 +202,61 @@ impl BucketTableDelegate {
         self.rows = rows;
         self.loading = false;
         self.recompute();
+    }
+
+    /// 列表加载时用全局缓存快照填充（缓存里可能有上次访问拉到的值）
+    fn set_stats(&mut self, stats: HashMap<String, BucketStat>) {
+        self.stats = stats;
+    }
+
+    /// 单个 bucket 的统计到达：更新并重排序（当前排序键可能正是统计列）
+    fn insert_stat(&mut self, bucket: String, stat: BucketStat) {
+        self.stats.insert(bucket, stat);
+        self.recompute();
+    }
+
+    /// Objects 列：对象总数
+    fn stat_count_cell(&self, bucket: &str) -> Div {
+        let text = match self.stats.get(bucket) {
+            Some(stat) => format_count(stat.object_count),
+            None => "-".to_string(),
+        };
+
+        stat_cell_div(text)
+    }
+
+    /// 存储量列：human readable（如 "1.5 GB"），悬浮用 HoverCard 显示精确字节数。
+    /// 普通 div 挂不了 .tooltip()（ManagedTooltipExt 是 crate 私有），HoverCard
+    /// 走 deferred 层绘制，不会被表格裁掉（job.rs 的错误卡片同款做法）。
+    ///
+    /// 垂直居中放在**外层** div 上：HoverCard 的 trigger 会被包一层无高度的
+    /// `div#trigger`，size_full 的单元格放在里面会失效、贴顶
+    fn stat_size_cell(&self, bucket: &str, col_ix: usize, pick: fn(&BucketStat) -> u64) -> AnyElement {
+        let Some(bytes) = self.stats.get(bucket).map(pick) else {
+            return stat_cell_div("-".to_string()).into_any_element();
+        };
+
+        div()
+            .size_full()
+            .v_flex()
+            .justify_center()
+            .child(
+                HoverCard::new((SharedString::from(bucket), col_ix))
+                    // 这几列靠右，卡片往左下展开才不会顶出窗口
+                    .anchor(Anchor::TopRight)
+                    .trigger(
+                        div()
+                            .text_sm()
+                            .text_align(TextAlign::Right)
+                            .child(format_file_size(bytes)),
+                    )
+                    .content(move |_, _, _| {
+                        div()
+                            .text_sm()
+                            .child(format!("{} bytes", format_count(bytes)))
+                    }),
+            )
+            .into_any_element()
     }
 
     pub fn extend_rows(&mut self, rows: Vec<BucketSummary>) {
@@ -117,11 +287,36 @@ impl BucketTableDelegate {
             return; // 没有排序 → 自然序，完事
         };
         let desc = sort == ColumnSort::Descending;
+
+        // 统计列（5..=10）的排序键提前取出来：sort_by 的闭包已经可变借用了
+        // filtered_indexes，闭包里不能再整借 self 调方法，只能直接读字段
+        let stat_keys: Vec<u64> = match col_ix {
+            5..=10 => {
+                let pick: fn(&BucketStat) -> u64 = match col_ix {
+                    5 => |s| s.object_count,
+                    6 => |s| s.standard_storage,
+                    7 => |s| s.infrequent_access_storage,
+                    8 => |s| s.archive_storage,
+                    9 => |s| s.cold_archive_storage,
+                    _ => |s| s.deep_cold_archive_storage,
+                };
+
+                // 统计还没到的按 0 排（列表刚出来时它们都在路上）
+                self.rows
+                    .iter()
+                    .map(|b| self.stats.get(&b.name).map(pick).unwrap_or(0))
+                    .collect()
+            }
+            _ => Vec::new(),
+        };
+
         self.filtered_indexes.sort_by(|&a, &b| {
+            // 列号：0=#, 1=icon, 2=Bucket, 3=Region, 4=Storage type,
+            // 5..=10=统计列, 11=actions
             let o = match col_ix {
-                1 => self.rows[a].name.cmp(&self.rows[b].name),
-                2 => self.rows[a].region.cmp(&self.rows[b].region),
-                3 => self.rows[a].creation_date.cmp(&self.rows[b].creation_date),
+                2 => self.rows[a].name.cmp(&self.rows[b].name),
+                3 => self.rows[a].region.cmp(&self.rows[b].region),
+                5..=10 => stat_keys[a].cmp(&stat_keys[b]),
                 _ => std::cmp::Ordering::Equal,
             };
             if desc { o.reverse() } else { o }
@@ -231,16 +426,15 @@ impl TableDelegate for BucketTableDelegate {
                 .text_sm()
                 .v_flex()
                 .justify_center()
-                .child(format_datetime(&row.creation_date))
-                .into_any_element(),
-            5 => div()
-                .size_full()
-                .text_sm()
-                .v_flex()
-                .justify_center()
                 .child(row.storage_class.to_string())
                 .into_any_element(),
-            6 => {
+            5 => self.stat_count_cell(&row.name).into_any_element(),
+            6 => self.stat_size_cell(&row.name, 6, |s| s.standard_storage),
+            7 => self.stat_size_cell(&row.name, 7, |s| s.infrequent_access_storage),
+            8 => self.stat_size_cell(&row.name, 8, |s| s.archive_storage),
+            9 => self.stat_size_cell(&row.name, 9, |s| s.cold_archive_storage),
+            10 => self.stat_size_cell(&row.name, 10, |s| s.deep_cold_archive_storage),
+            11 => {
                 let panel = self.bucket_list_panel.clone();
                 let name = row.name.clone();
                 let region = row.region.clone();
@@ -306,6 +500,8 @@ pub struct BucketListPanel {
     search_state: Entity<InputState>,
     is_truncated: bool,
     next_marker: Option<String>,
+    /// 正在拉统计的 bucket（防止同一 bucket 重复发请求）
+    stats_inflight: HashSet<String>,
     _subs: Vec<Subscription>,
 }
 
@@ -347,6 +543,7 @@ impl BucketListPanel {
             search_state,
             is_truncated: false,
             next_marker: None,
+            stats_inflight: HashSet::new(),
             _subs: vec![search_sub],
         };
 
@@ -411,6 +608,11 @@ impl BucketListPanel {
                         );
 
                         view.buckets_state.update(cx, |state, cx| {
+                            // 统计快照先填上：缓存里可能有上次访问拉到的值，
+                            // 首帧就能显示，不用等这次请求回来
+                            let stats = cx.global::<BucketStatsCache>().snapshot();
+                            state.delegate_mut().set_stats(stats);
+
                             if extend_mode {
                                 state.delegate_mut().extend_rows(buckets);
                             } else {
@@ -420,6 +622,8 @@ impl BucketListPanel {
                             cx.notify();
                         });
                         view.load_state = LoadState::Loaded;
+                        // 列表出来了，顺手把还没缓存的 bucket 统计补上
+                        view.fetch_missing_stats(cx);
                     }
                     Err(e) => {
                         let msg = e.to_string();
@@ -433,6 +637,76 @@ impl BucketListPanel {
         });
     }
 
+    /// 为列表里还没有统计缓存的 bucket 拉取统计。
+    ///
+    /// - 缓存命中不发请求；正在飞的（`stats_inflight`）也不重复发
+    /// - 每个 bucket 用它自己 region 的 client（统计是 bucket 级请求）
+    /// - 失败静默：列里保持 "-"，下次刷新再试
+    fn fetch_missing_stats(&mut self, cx: &mut Context<Self>) {
+        let missing: Vec<(String, String)> = self
+            .buckets_state
+            .read(cx)
+            .delegate()
+            .rows
+            .iter()
+            .filter(|b| {
+                cx.global::<BucketStatsCache>().get(&b.name).is_none()
+                    && !self.stats_inflight.contains(&b.name)
+            })
+            .map(|b| (b.name.clone(), b.region.clone()))
+            .collect();
+
+        if missing.is_empty() {
+            return;
+        }
+
+        let handle = tokio_runtime().handle().clone();
+
+        for (name, region) in missing {
+            self.stats_inflight.insert(name.clone());
+
+            let client = Arc::new(self.ossclient.clone_to(&region, oss_endpoint(&region)));
+            let handle = handle.clone();
+
+            cx.spawn(async move |this, cx| {
+                let join = handle.spawn({
+                    let client = client.clone();
+                    let name = name.clone();
+                    async move { client.get_bucket_stat(name.as_str()).await }
+                });
+
+                let _abort_on_drop = AbortOnDrop(join.abort_handle());
+
+                let result = match join.await {
+                    Ok(Ok(v)) => Ok(v),
+                    Ok(Err(e)) => Err(anyhow::anyhow!("{e}")),
+                    Err(join_err) => Err(anyhow::anyhow!("oss task failed: {join_err}")),
+                };
+
+                this.update(cx, |view, cx| {
+                    view.stats_inflight.remove(&name);
+
+                    if let Ok(stat) = result {
+                        cx.global_mut::<BucketStatsCache>()
+                            .insert(name.clone(), stat.clone());
+
+                        view.buckets_state.update(cx, |state, cx| {
+                            // delegate 里更新 + 重排序（当前排序键可能就是统计列），
+                            // 统计列从 "-" 变成数值
+                            state.delegate_mut().insert_stat(name, stat);
+                            cx.notify();
+                        });
+
+                        // 顶部的合计块在 panel 的 render 里，表格 notify 不够
+                        cx.notify();
+                    }
+                })
+                .ok();
+            })
+            .detach();
+        }
+    }
+
     fn show_bucket_detail(
         &mut self,
         bucket_name: &str,
@@ -443,11 +717,7 @@ impl BucketListPanel {
         // get_bucket_info 是 bucket 级请求，必须用 bucket 所在 region 的 client。
         // 列表用的是账号 region 的 client（GetService 任何 endpoint 都能列），
         // 但详情跨区会报 "must be addressed using the specified endpoint"。
-        let endpoint = oss_region_map()
-            .get(region)
-            .map(|r| r.to_string())
-            .unwrap_or(format!("oss-{}.aliyuncs.com", region));
-        let client = Arc::new(self.ossclient.clone_to(region, endpoint));
+        let client = Arc::new(self.ossclient.clone_to(region, oss_endpoint(region)));
         let bucket_name = bucket_name.to_string();
         let detail_view =
             cx.new(|cx| BucketDetailPanel::new(client, bucket_name.clone(), window, cx));
@@ -477,6 +747,71 @@ impl BucketListPanel {
     }
 }
 
+impl BucketListPanel {
+    /// 已加载 bucket 的统计合计（搜索过滤不影响它——这是账号级的"总计"）
+    fn stat_totals(&self, cx: &App) -> StatTotals {
+        let delegate = self.buckets_state.read(cx).delegate();
+        let mut t = StatTotals::default();
+
+        for b in &delegate.rows {
+            if let Some(s) = delegate.stats.get(&b.name) {
+                t.objects += s.object_count;
+                t.standard += s.standard_storage;
+                t.infrequent += s.infrequent_access_storage;
+                t.archive += s.archive_storage;
+                t.cold_archive += s.cold_archive_storage;
+                t.deep_cold_archive += s.deep_cold_archive_storage;
+            }
+        }
+
+        t
+    }
+
+    /// 标题下的 6 个统计块：对象总数 + 各存储类型用量。
+    /// 颜色是"标准 → 深冷"的语义梯度：蓝(标准) → 青(低频) → 黄(归档) →
+    /// 品红(冷归档) → 红(深冷归档)，越靠后越"冷"、检索成本越高；
+    /// Objects 是总量不是存储类型，用中性前景色
+    fn stat_blocks(&self, cx: &App) -> Div {
+        let t = self.stat_totals(cx);
+        let has_stats = !self.buckets_state.read(cx).delegate().stats.is_empty();
+
+        // 统计还没拉回来时显示 "-"，别显示误导性的 0
+        let count = |v: u64| {
+            if has_stats {
+                format_count(v)
+            } else {
+                "-".to_string()
+            }
+        };
+        let size = |v: u64| {
+            if has_stats {
+                format_file_size(v)
+            } else {
+                "-".to_string()
+            }
+        };
+
+        div()
+            .w_full()
+            .h_flex()
+            .gap_2()
+            .child(stat_block("Objects", count(t.objects), cx.theme().foreground))
+            .child(stat_block("Standard", size(t.standard), cx.theme().blue))
+            .child(stat_block("Infrequent", size(t.infrequent), cx.theme().cyan))
+            .child(stat_block("Archive", size(t.archive), cx.theme().yellow))
+            .child(stat_block(
+                "Cold Archive",
+                size(t.cold_archive),
+                cx.theme().magenta,
+            ))
+            .child(stat_block(
+                "Deep Cold Archive",
+                size(t.deep_cold_archive),
+                cx.theme().red,
+            ))
+    }
+}
+
 impl Render for BucketListPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
@@ -484,8 +819,10 @@ impl Render for BucketListPanel {
             .v_flex()
             .gap_2()
             .child(div().text_3xl().child("Buckets"))
+            .child(self.stat_blocks(cx))
             .child(
                 div()
+                    .mt_2()
                     .w_full()
                     .h_flex()
                     .gap_2()
@@ -502,6 +839,9 @@ impl Render for BucketListPanel {
                             .loading(self.load_state == LoadState::Loading)
                             .icon(IconName::RefreshCw)
                             .on_click(cx.listener(|view, _, _, cx| {
+                                // 统计缓存一并清掉，随列表重载重新拉
+                                cx.global_mut::<BucketStatsCache>().clear();
+                                view.stats_inflight.clear();
                                 view.load_buckets(false, cx);
                             })),
                     )

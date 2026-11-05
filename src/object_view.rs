@@ -21,7 +21,7 @@ use gpui_kit::{
 use crate::{
     actions::{DeleteAction, DownloadAction, OpenFilesForUploadAction, OpenFolderForUploadAction},
     common::{
-        AbortOnDrop, LoadState, file_name, format_datetime, format_file_size, oss_region_map,
+        AbortOnDrop, LoadState, file_name, format_datetime, format_file_size, oss_endpoint,
         safe_file_name, safe_relative_path, tokio_runtime,
     },
     job::{JobKind, JobQueue},
@@ -238,10 +238,7 @@ impl ObjectListPanel {
         });
 
         let this_weak = cx.weak_entity();
-        let endpoint = oss_region_map()
-            .get(region.as_str())
-            .map(|r| r.to_string())
-            .unwrap_or(format!("oss-{}.aliyuncs.com", region));
+        let endpoint = oss_endpoint(&region);
 
         let this = Self {
             main_view,

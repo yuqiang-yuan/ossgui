@@ -81,6 +81,8 @@ fn main() {
         }
 
         cx.set_global(settings);
+        // bucket 统计信息的应用级缓存（刷新按钮会清）
+        cx.set_global(bucket_view::BucketStatsCache::default());
 
         cx.on_app_quit(|cx| {
             // 注意顺序：gpui 的 shutdown 是「先同步跑观察者的函数体 → 再清空窗口

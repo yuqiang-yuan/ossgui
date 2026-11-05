@@ -57,9 +57,10 @@ pub fn format_datetime(raw: &str) -> String {
     }
 }
 
-/// 把字节数格式化成 B / KB / MB / GB（1024 进制），KB 以上保留 1 位小数
+/// 把字节数格式化成 B / KB / MB / GB / TB / PB（1024 进制）。
+/// KB 以上保留 1 位小数，整数部分带千分位；PB 是最大单位。
 pub fn format_file_size(bytes: u64) -> String {
-    const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
+    const UNITS: [&str; 6] = ["B", "KB", "MB", "GB", "TB", "PB"];
     let mut size = bytes as f64;
     let mut unit = 0;
     while size >= 1024.0 && unit < UNITS.len() - 1 {
@@ -67,10 +68,42 @@ pub fn format_file_size(bytes: u64) -> String {
         unit += 1;
     }
     if unit == 0 {
-        format!("{} {}", bytes, UNITS[0]) // 字节是整数，别显示成 123.0 B
+        format!("{} {}", format_count(bytes), UNITS[0]) // 字节是整数，别显示成 123.0 B
     } else {
-        format!("{:.1} {}", size, UNITS[unit])
+        format!("{} {}", format_size_number(size), UNITS[unit])
     }
+}
+
+/// 大小数字：一位小数 + 整数部分千分位（如 1,234.5）
+fn format_size_number(size: f64) -> String {
+    let s = format!("{size:.1}");
+    let (int_part, frac) = s.split_once('.').unwrap_or((s.as_str(), "0"));
+    let int_val: u64 = int_part.parse().unwrap_or(0);
+
+    format!("{}.{}", format_count(int_val), frac)
+}
+
+/// region → OSS endpoint。map 里没有的 region 按 `oss-{region}.aliyuncs.com` 兜底。
+pub fn oss_endpoint(region: &str) -> String {
+    oss_region_map()
+        .get(region)
+        .map(|r| r.to_string())
+        .unwrap_or(format!("oss-{}.aliyuncs.com", region))
+}
+
+/// 大整数加千分位（统计数字用）
+pub fn format_count(n: u64) -> String {
+    let s = n.to_string();
+    let mut out = String::with_capacity(s.len() + s.len() / 3);
+
+    for (i, c) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+
+    out
 }
 
 pub fn oss_region_map() -> &'static HashMap<&'static str, &'static str> {
