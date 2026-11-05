@@ -1,17 +1,22 @@
-use std::fs;
+use std::{collections::HashMap, fs};
 
 use gpui_kit::Global;
 use serde::{Deserialize, Serialize};
 
 use crate::globals::APP_ID;
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
     pub is_dark: Option<bool>,
     pub window_width: Option<f32>,
     pub window_height: Option<f32>,
     pub window_maximized: Option<bool>,
     pub font_size: Option<f32>,
+    /// bucket 表用户调整过的列宽：列 key → 宽度（px）。
+    /// 按 key 存，列增删后老宽度还能对上
+    pub bucket_column_widths: Option<HashMap<String, f32>>,
+    /// object 表同上
+    pub object_column_widths: Option<HashMap<String, f32>>,
 }
 
 impl Global for AppSettings {}
@@ -57,6 +62,8 @@ impl Default for AppSettings {
             window_width: Some(1200.0),
             window_height: Some(800.0),
             font_size: Some(16.0),
+            bucket_column_widths: None,
+            object_column_widths: None,
         }
     }
 }

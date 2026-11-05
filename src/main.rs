@@ -130,7 +130,7 @@ fn open_main_window(cx: &mut App) {
         return;
     }
 
-    let settings = *cx.global::<AppSettings>();
+    let settings = cx.global::<AppSettings>().clone();
     let is_max = settings.window_maximized.unwrap_or(false);
 
     // TODO: Test if the window bounds over the screen's bounds.

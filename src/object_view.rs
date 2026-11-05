@@ -1,4 +1,10 @@
-use std::{cmp::Ordering, collections::HashSet, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    cmp::Ordering,
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+    sync::Arc,
+    time::Duration,
+};
 
 use ali_oss_rs::{
     Client,
@@ -14,7 +20,7 @@ use gpui_kit::{
         Disableable, IndexPath, Placement, StyledExt,
         input::{InputEvent, InputState},
     }, component::{
-        ActiveTheme, Icon, Sizable, WindowExt, button::{Button, ButtonVariant, ButtonVariants}, checkbox::Checkbox, description_list::{DescriptionItem, DescriptionList}, input::Input, marker::{Marker, MarkerAlignment, MarkerContent, MarkerVariant}, menu::{DropdownMenu, PopupMenuItem}, notification::NotificationType, progress::ProgressCircle, select::{Select, SelectEvent, SelectState}, table::{Column, ColumnSort, DataTable, TableDelegate, TableState},
+        ActiveTheme, Icon, Sizable, WindowExt, button::{Button, ButtonVariant, ButtonVariants}, checkbox::Checkbox, description_list::{DescriptionItem, DescriptionList}, input::Input, marker::{Marker, MarkerAlignment, MarkerContent, MarkerVariant}, menu::{DropdownMenu, PopupMenuItem}, notification::NotificationType, progress::ProgressCircle, select::{Select, SelectEvent, SelectState}, table::{Column, ColumnSort, DataTable, TableDelegate, TableEvent, TableState},
     }, div, img, px,
 };
 
@@ -26,6 +32,7 @@ use crate::{
     },
     job::{JobKind, JobQueue},
     main_view::MainView,
+    settings::AppSettings,
 };
 
 pub struct ObjectListPanel {
@@ -240,6 +247,34 @@ impl ObjectListPanel {
         let this_weak = cx.weak_entity();
         let endpoint = oss_endpoint(&region);
 
+        let saved_widths = cx.global::<AppSettings>().object_column_widths.clone();
+        let objects_state = cx.new(|cx| {
+            TableState::new(ObjectTableDelegate::new(this_weak, saved_widths), window, cx)
+                .row_selectable(true)
+                .col_selectable(false)
+                .cell_selectable(false)
+        });
+
+        // 用户拖完列宽（或双击 fit）时把当前宽度存进设置，下次打开恢复
+        let widths_sub = cx.subscribe(&objects_state, |_view, state, event: &TableEvent, cx| {
+            let TableEvent::ColumnWidthsChanged(widths) = event else {
+                return;
+            };
+
+            // 列 key → 宽度（事件给的是按列序的 Vec）
+            let delegate = state.read(cx).delegate();
+            let map: HashMap<String, f32> = delegate
+                .columns
+                .iter()
+                .zip(widths.iter())
+                .map(|(col, w)| (col.key.to_string(), f32::from(*w)))
+                .collect();
+
+            let settings = cx.global_mut::<AppSettings>();
+            settings.object_column_widths = Some(map);
+            settings.save();
+        });
+
         let this = Self {
             main_view,
             ossclient: Arc::new(ossclient.clone_to(region, endpoint)),
@@ -253,16 +288,11 @@ impl ObjectListPanel {
             load_state: LoadState::Idle,
             load_task: Task::ready(()),
             page_size_state,
-            objects_state: cx.new(|cx| {
-                TableState::new(ObjectTableDelegate::new(this_weak), window, cx)
-                    .row_selectable(true)
-                    .col_selectable(false)
-                    .cell_selectable(false)
-            }),
+            objects_state,
             create_folder_task: Task::ready(()),
             refresh_pending: false,
             refresh_again: false,
-            _subs: vec![search_sub, page_size_sub, job_sub],
+            _subs: vec![search_sub, page_size_sub, job_sub, widths_sub],
         };
 
         cx.on_next_frame(window, |this, _, cx| this.load_objects(cx));
@@ -1513,18 +1543,11 @@ struct ObjectTableDelegate {
 }
 
 impl ObjectTableDelegate {
-    fn new(object_list_panel: WeakEntity<ObjectListPanel>) -> Self {
-        Self {
-            object_list_panel,
-            rows: Vec::new(),
-            prefix: String::new(),
-            server_prefix: None,
-            filtered_indexes: Vec::new(),
-            loading: false,
-            search: String::new(),
-            current_sort: None,
-            selected_indexes: HashSet::new(),
-            columns: vec![
+    fn new(
+        object_list_panel: WeakEntity<ObjectListPanel>,
+        saved_widths: Option<HashMap<String, f32>>,
+    ) -> Self {
+        let mut columns = vec![
                 Column::new("ck", "")
                     .width(px(60.0))
                     .movable(false)
@@ -1552,7 +1575,28 @@ impl ObjectTableDelegate {
                 // 行内操作列（跟 bucket view 的形制一致）。
                 // 三个按钮（下载/详情/更多）所以比 bucket view 那个 60 宽一点
                 Column::new("actions", "").width(px(130.0)).movable(false),
-            ],
+            ];
+
+        // 恢复用户调整过的列宽（按列 key 匹配，列增删不受影响）
+        if let Some(widths) = &saved_widths {
+            for col in &mut columns {
+                if let Some(w) = widths.get(col.key.as_ref()) {
+                    col.width = px(*w);
+                }
+            }
+        }
+
+        Self {
+            object_list_panel,
+            rows: Vec::new(),
+            prefix: String::new(),
+            server_prefix: None,
+            filtered_indexes: Vec::new(),
+            loading: false,
+            search: String::new(),
+            current_sort: None,
+            selected_indexes: HashSet::new(),
+            columns,
         }
     }
 

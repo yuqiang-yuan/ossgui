@@ -25,7 +25,7 @@ use gpui_kit::{
         input::Input,
         notification::NotificationType,
         progress::ProgressCircle,
-        table::{Column, ColumnSort, DataTable, TableDelegate, TableState},
+        table::{Column, ColumnSort, DataTable, TableDelegate, TableState, TableEvent},
     },
     div, px,
 };
@@ -36,6 +36,7 @@ use crate::{
         tokio_runtime,
     },
     main_view::MainView,
+    settings::AppSettings,
 };
 
 /// bucket 统计信息的应用级缓存：bucket 名 → 统计。
@@ -131,14 +132,11 @@ pub struct BucketTableDelegate {
 }
 
 impl BucketTableDelegate {
-    pub fn new(bucket_list_panel: WeakEntity<BucketListPanel>) -> Self {
-        Self {
-            rows: Vec::new(),
-            stats: HashMap::new(),
-            filtered_indexes: Vec::new(),
-            loading: true, // 首屏直接骨架屏
-            bucket_list_panel,
-            columns: vec![
+    pub fn new(
+        bucket_list_panel: WeakEntity<BucketListPanel>,
+        saved_widths: Option<HashMap<String, f32>>,
+    ) -> Self {
+        let mut columns = vec![
                 Column::new("ix", "#")
                     .width(px(40.0))
                     .text_right()
@@ -192,7 +190,24 @@ impl BucketTableDelegate {
                     .movable(false)
                     .sortable(),
                 Column::new("actions", "").width(px(60.0)).movable(false),
-            ],
+            ];
+
+        // 恢复用户调整过的列宽（按列 key 匹配，列增删不受影响）
+        if let Some(widths) = &saved_widths {
+            for col in &mut columns {
+                if let Some(w) = widths.get(col.key.as_ref()) {
+                    col.width = px(*w);
+                }
+            }
+        }
+
+        Self {
+            rows: Vec::new(),
+            stats: HashMap::new(),
+            filtered_indexes: Vec::new(),
+            loading: true, // 首屏直接骨架屏
+            bucket_list_panel,
+            columns,
             search: String::new(),
             current_sort: None,
         }
@@ -529,22 +544,45 @@ impl BucketListPanel {
         });
 
         let this_weak = cx.weak_entity();
+        let saved_widths = cx.global::<AppSettings>().bucket_column_widths.clone();
+        let buckets_state = cx.new(|cx| {
+            TableState::new(BucketTableDelegate::new(this_weak, saved_widths), window, cx)
+                .row_selectable(true)
+                .col_selectable(false)
+                .cell_selectable(false)
+        });
+
+        // 用户拖完列宽（或双击 fit）时把当前宽度存进设置，下次打开恢复
+        let widths_sub = cx.subscribe(&buckets_state, |_view, state, event: &TableEvent, cx| {
+            let TableEvent::ColumnWidthsChanged(widths) = event else {
+                return;
+            };
+
+            // 列 key → 宽度（事件给的是按列序的 Vec）
+            let delegate = state.read(cx).delegate();
+            let map: HashMap<String, f32> = delegate
+                .columns
+                .iter()
+                .zip(widths.iter())
+                .map(|(col, w)| (col.key.to_string(), f32::from(*w)))
+                .collect();
+
+            let settings = cx.global_mut::<AppSettings>();
+            settings.bucket_column_widths = Some(map);
+            settings.save();
+        });
+
         let this = Self {
             main_view,
             ossclient,
             load_state: LoadState::Idle,
-            buckets_state: cx.new(|cx| {
-                TableState::new(BucketTableDelegate::new(this_weak), window, cx)
-                    .row_selectable(true)
-                    .col_selectable(false)
-                    .cell_selectable(false)
-            }),
+            buckets_state,
             load_task: Task::ready(()), // 占位，load_buckets 里会替换
             search_state,
             is_truncated: false,
             next_marker: None,
             stats_inflight: HashSet::new(),
-            _subs: vec![search_sub],
+            _subs: vec![search_sub, widths_sub],
         };
 
         cx.on_next_frame(window, |this, _, cx| this.load_buckets(false, cx));
