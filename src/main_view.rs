@@ -8,7 +8,7 @@ use gpui_kit::{
     assets::IconName,
     base::{Disableable, Placement, StyledExt, resizable_panel},
     component::{
-        ActiveTheme, Sizable, Theme, ThemeMode, TitleBar, WindowExt,
+        ActiveTheme, Icon, Sizable, Theme, ThemeMode, TitleBar, WindowExt,
         button::{Button, ButtonVariant, ButtonVariants},
         h_resizable,
         menu::{AppMenuBar, DropdownMenu, PopupMenuItem},
@@ -545,6 +545,24 @@ impl MainView {
             .icon(IconName::ArrowUpDown)
             .label(label)
             .text_color(color)
+            // 尾部这个图标说的是"点一下会怎样"，不是"面板现在开着" ——
+            // 面板开没开屏幕上直接看得见，图标再复述一遍没有信息量；
+            // 而"这个按钮管的是右边那个面板"是看不出来的。
+            // 另外 open/close 这两个名字本身就是动词，当动作读才顺
+            .tooltip(if self.jobs_open {
+                "Close the transfers panel"
+            } else {
+                "Open the transfers panel"
+            })
+            .tooltip_placement(Placement::Top)
+            .child(
+                Icon::new(if self.jobs_open {
+                    IconName::PanelRightClose
+                } else {
+                    IconName::PanelRightOpen
+                })
+                .small(),
+            )
             .on_click(cx.listener(|this, _, _, cx| {
                 this.jobs_open = !this.jobs_open;
 
