@@ -134,8 +134,10 @@ jobs:
 
   macos-arm64:
     name: macOS arm64 (dmg)
-    # macos-14 起都是 Apple Silicon
-    runs-on: macos-14
+    # macos-15 是 Apple Silicon（arm64）镜像。
+    # 别用 macos-14：那个镜像 2026-11-02 已从 GitHub Actions 退役，
+    # 会直接报 "configuration ... is not supported"
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v7
 
