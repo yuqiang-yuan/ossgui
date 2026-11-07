@@ -174,6 +174,27 @@ pub fn oss_region_map() -> &'static HashMap<&'static str, &'static str> {
     })
 }
 
+/// gpui 能解码的图片扩展名（小写、不带点）。
+/// 故意不列 avif/heic 这类 —— 列了解不动的格式，预览区只会显示
+/// "Failed to load image"，不如直接判成不可预览
+const IMAGE_EXTENSIONS: &[&str] = &[
+    "png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "tif", "tiff", "ico",
+];
+
+/// 对象能不能当图片预览。
+///
+/// **key 有扩展名时以扩展名为准**，没有扩展名才退回 content-type ——
+/// 很多对象上传时根本没设 content-type，只看 header 会把图片漏掉。
+/// content-type 的匹配放最宽（`image/` 前缀，`image/png; charset=...` 也算）
+pub fn is_image(key: &str, content_type: Option<&str>) -> bool {
+    // 只取最后一段做判断，目录名里的点（my.folder/）不影响；
+    // `.png` 这种隐藏文件 Path::extension 返回 None，走 content-type 分支
+    match std::path::Path::new(key).extension().and_then(|ext| ext.to_str()) {
+        Some(ext) => IMAGE_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str()),
+        None => content_type.is_some_and(|ct| ct.starts_with("image/")),
+    }
+}
+
 /// Extract the file name from object key
 pub fn file_name(s: &str) -> &str {
     let Some(pos) = s.rfind('/') else {
@@ -235,3 +256,32 @@ pub fn safe_relative_path(rel: &str) -> PathBuf {
 // pub fn current_timestamp_ms() -> i64 {
 //     Utc::now().timestamp_millis()
 // }
+
+#[cfg(test)]
+mod tests {
+    use super::is_image;
+
+    #[test]
+    fn extension_wins_over_content_type() {
+        // 常见扩展名，大小写不敏感
+        assert!(is_image("photos/vacation/1.jpg", None));
+        assert!(is_image("photos/vacation/1.PNG", None));
+        assert!(is_image("icon.svg", None));
+
+        // 有扩展名时扩展名说了算：即使 content-type 是 image/ 也不预览
+        assert!(!is_image("a/b/notes.txt", Some("image/png")));
+
+        // 没有扩展名才退回 content-type
+        assert!(is_image("my.folder/readme", Some("image/png")));
+        assert!(is_image("my.folder/readme", Some("image/png; charset=binary")));
+        assert!(!is_image("my.folder/readme", Some("text/plain")));
+        assert!(!is_image("my.folder/readme", None));
+
+        // 目录名带点、隐藏文件，都不该误判
+        assert!(!is_image("my.folder/notes", Some("text/plain")));
+        assert!(!is_image("a/b/.gitignore", Some("text/plain")));
+
+        // gpui 解不动的格式不预览
+        assert!(!is_image("a/b/photo.avif", None));
+    }
+}

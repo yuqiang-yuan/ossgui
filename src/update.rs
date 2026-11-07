@@ -10,7 +10,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
 
-/// 提示里点一下就跳这里（GitHub 会重定向到最新 tag 的页面）
+/// 新版本提示点一下就跳这里（GitHub 会重定向到最新 tag 的页面）
 pub const RELEASES_URL: &str = "https://github.com/yuqiang-yuan/ossgui/releases/latest";
 
 const LATEST_RELEASE_API: &str =

@@ -27,8 +27,8 @@ use gpui_kit::{
 use crate::{
     actions::{DeleteAction, DownloadAction, OpenFilesForUploadAction, OpenFolderForUploadAction},
     common::{
-        AbortOnDrop, LoadState, file_name, format_datetime, format_file_size, oss_endpoint,
-        safe_file_name, safe_relative_path, tokio_runtime,
+        AbortOnDrop, LoadState, file_name, format_datetime, format_file_size, is_image,
+        oss_endpoint, safe_file_name, safe_relative_path, tokio_runtime,
     },
     job::{JobKind, JobQueue},
     main_view::MainView,
@@ -2314,11 +2314,15 @@ impl ObjectMetaPanel {
             .border_color(cx.theme().border)
             .rounded_md()
             .child(if self.load_state == LoadState::Loaded {
-                if let Some(mime_type) = self
+                // 先按扩展名判断，没有扩展名才看 content-type：
+                // 很多对象上传时没设 content-type，只看 header 会把图片漏掉
+                let content_type = self
                     .object_meta
                     .as_ref()
                     .and_then(|m| m.raw_headers.get("content-type"))
-                    && mime_type.starts_with("image/")
+                    .map(|s| s.as_str());
+
+                if is_image(&self.object_key, content_type)
                     && let Some(url) = self.presigned_url.clone()
                 {
                     let hint_text_color = cx.theme().secondary_foreground;

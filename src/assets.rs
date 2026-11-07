@@ -18,7 +18,8 @@ gpui_kit::assets::icon_assets!(
         CircleSlash2,
         X,
         CircleEllipsis,
-        CircleUserRound
+        CircleUserRound,
+        CircleFadingArrowUp,
     ]
 );
 

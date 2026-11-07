@@ -3,8 +3,9 @@ use std::sync::Arc;
 use ali_oss_rs::Client;
 use gpui_fps::fps_monitor;
 use gpui_kit::{
-    App, AppContext, Context, Entity, FocusHandle, InteractiveElement, IntoElement, Menu, MenuItem,
-    ParentElement, Render, StatefulInteractiveElement, Styled, Subscription, Task, Window,
+    App, AppContext, Context, Entity, FocusHandle, Hsla, InteractiveElement, IntoElement, Menu,
+    MenuItem, ParentElement, Render, StatefulInteractiveElement, Styled, Subscription, Task,
+    Window,
     assets::IconName,
     base::{Disableable, Placement, StyledExt, resizable_panel},
     component::{
@@ -673,6 +674,9 @@ impl Render for MainView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // 先取出来，后面 div 链里就不用一直借着 self
         let account_label = self.session.account_label();
+        // 新版本提示的强调色（primary）：状态栏一片 muted 里能跳出来，
+        // 又不刺眼。提前算好传给 update_chip，链里就不用借 cx 了
+        let update_accent = cx.theme().primary;
 
         div()
             .id("main-view")
@@ -821,7 +825,7 @@ impl Render for MainView {
                             .when_some(account_label, |this, label| this.child(label))
                             // 有新版本就挂在账号名右边，点一下跳 Releases
                             .when_some(self.update_available.clone(), |this, version| {
-                                this.child(update_chip(version))
+                                this.child(update_chip(version, update_accent))
                             }),
                     )
                     .right(
@@ -890,15 +894,24 @@ fn build_menus() -> Vec<Menu> {
     }
 }
 
-/// 状态栏上的"有新版本"入口：点一下打开 Releases 页面。
+/// 状态栏上的"有新版本"入口：点一下打开最新 Release 的页面。
 ///
 /// 只是个提示 + 跳转，不下载也不安装。tooltip 往上弹 —— 状态栏贴着窗口底边
-fn update_chip(version: String) -> impl IntoElement {
+fn update_chip(version: String, accent: Hsla) -> impl IntoElement {
     Button::new("update-available-button")
         .icon(IconName::CircleFadingArrowUp)
         .label(format!("New version {version}"))
-        .text()
+        // 不能用 .text()：Text/Link 变体在 gpui-component 里是 no_padding 的
+        // （button.rs 只在 !no_padding() 时才上 h_6/px_2），hitbox 会缩成紧贴
+        // 文字的小盒子；而 gpui 的 click 在 mouse-up 时要求指针还压在 hitbox
+        // 上，按一下鼠标滚 1~2px 就出界 —— 点击被静默丢掉，表现为"偶发没反应"。
+        // ghost 带 padding（h_6 + px_2）目标够大，和旁边的 Transfers 按钮一致
+        .ghost()
+        .small()
         .text_sm()
+        // primary 强调色：不搞填充背景（chip 会常驻到用户更新为止），
+        // 也不能用 danger 红 —— 这个应用里红 = 传输任务失败
+        .text_color(accent)
         .tooltip("Open the releases page")
         .tooltip_placement(Placement::Top)
         .on_click(|_, _, cx| cx.open_url(update::RELEASES_URL))
