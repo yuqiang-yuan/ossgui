@@ -50,15 +50,29 @@ jobs:
       - name: 构建
         run: cargo build --release
 
-      # appimagetool 打包时会自己去 GitHub 现下 type2 runtime，那一步偶发 504
-      # （2026-11 挂过一次）。这里带重试地下好，再用 APPIMAGETOOL_RUNTIME_FILE
-      # 指给它（appimagetool 源码里的 getenv），把那次下载彻底绕开。
-      - name: 预下载 AppImage runtime
+      # 打包前的两件预置：
+      # 1. appimagetool 打包时会自己去 GitHub 现下 type2 runtime，那一步偶发
+      #    504（2026-11 挂过一次）。这里带重试地下好，再用
+      #    APPIMAGETOOL_RUNTIME_FILE 指给它（appimagetool 源码里的 getenv），
+      #    把那次下载彻底绕开。
+      # 2. cargo-packager 的上游 bug：它把下载的 AppRun 写缓存时权限设成
+      #    764（缺 others 的 x，本意是 755），导致 AppImage 里的 AppRun 不是
+      #    可执行的，别人下载后跑不起来（appimage.github.io 收录校验就挂在
+      #    这）。它下载前先查缓存里是否已存在，所以预放一份 0755 的同源文件
+      #    让它直接采用。
+      - name: 预下载 AppImage runtime / 预放 AppRun
         run: |
           curl -fL --retry 5 --retry-delay 5 --retry-all-errors \
             -o "$RUNNER_TEMP/runtime-x86_64" \
             https://github.com/AppImage/type2-runtime/releases/download/continuous/runtime-x86_64
           echo "APPIMAGETOOL_RUNTIME_FILE=$RUNNER_TEMP/runtime-x86_64" >> "$GITHUB_ENV"
+
+          mkdir -p "$HOME/.cache/.cargo-packager/AppImage"
+          curl -fL --retry 5 --retry-delay 5 --retry-all-errors \
+            -o "$RUNNER_TEMP/AppRun-x86_64" \
+            https://github.com/tauri-apps/binary-releases/releases/download/apprun-old/AppRun-x86_64
+          install -m 0755 "$RUNNER_TEMP/AppRun-x86_64" \
+            "$HOME/.cache/.cargo-packager/AppImage/AppRun-x86_64"
 
       - name: 打包 deb + AppImage
         run: cargo packager --release --formats deb,appimage
@@ -109,13 +123,20 @@ jobs:
       - name: 构建
         run: cargo build --release
 
-      # 同 linux-x64，只是换成 arm64 的 runtime
-      - name: 预下载 AppImage runtime
+      # 同 linux-x64，只是换成 arm64 的 runtime / AppRun
+      - name: 预下载 AppImage runtime / 预放 AppRun
         run: |
           curl -fL --retry 5 --retry-delay 5 --retry-all-errors \
             -o "$RUNNER_TEMP/runtime-aarch64" \
             https://github.com/AppImage/type2-runtime/releases/download/continuous/runtime-aarch64
           echo "APPIMAGETOOL_RUNTIME_FILE=$RUNNER_TEMP/runtime-aarch64" >> "$GITHUB_ENV"
+
+          mkdir -p "$HOME/.cache/.cargo-packager/AppImage"
+          curl -fL --retry 5 --retry-delay 5 --retry-all-errors \
+            -o "$RUNNER_TEMP/AppRun-aarch64" \
+            https://github.com/tauri-apps/binary-releases/releases/download/apprun-old/AppRun-aarch64
+          install -m 0755 "$RUNNER_TEMP/AppRun-aarch64" \
+            "$HOME/.cache/.cargo-packager/AppImage/AppRun-aarch64"
 
       - name: 打包 deb + AppImage
         run: cargo packager --release --formats deb,appimage
