@@ -4,8 +4,8 @@ use ali_oss_rs::Client;
 use gpui_fps::fps_monitor;
 use gpui_kit::{
     App, AppContext, Context, Entity, FocusHandle, Hsla, InteractiveElement, IntoElement, Menu,
-    MenuItem, ParentElement, Render, StatefulInteractiveElement, Styled, Subscription, Task,
-    Window,
+    MenuItem, MouseButton, ParentElement, Render, StatefulInteractiveElement, Styled, Subscription,
+    Task, Window,
     assets::IconName,
     base::{Disableable, Placement, StyledExt, resizable_panel},
     component::{
@@ -705,8 +705,8 @@ impl Render for MainView {
                             .h_flex()
                             .child(self.menubar.clone())
                             .child(div().flex_grow_1())
-                            .child(font_size_button())
-                            .child(theme_button(cx)),
+                            .child(title_bar_control(font_size_button()))
+                            .child(title_bar_control(theme_button(cx))),
                     ),
             )
             .child(
@@ -915,6 +915,22 @@ fn update_chip(version: String, accent: Hsla) -> impl IntoElement {
         .tooltip("Open the releases page")
         .tooltip_placement(Placement::Top)
         .on_click(|_, _, cx| cx.open_url(update::RELEASES_URL))
+}
+
+/// 包一层，挡掉标题栏「左键按下」的冒泡 —— 不挡的话这一次点击会被窗口拖动吃掉。
+///
+/// TitleBar 在左键按下时把内部 `should_move` 置真，指针只要动一下（1~2px）就调
+/// `start_window_move()` 去拖窗口，press/release 于是不再构成一次点击：表现就是
+/// 「按钮时灵时不灵，手一抖就点不动」。gpui-component 的 AppMenuBar
+/// （app_menu_bar.rs，注释原文 "Stop propagation to avoid dragging the window."）
+/// 和标题栏自己的最小化/最大化/关闭按钮都是这么挡的；菜单栏、X 按钮不用管，它们已经挡了。
+fn title_bar_control(child: impl IntoElement) -> impl IntoElement {
+    div()
+        .on_mouse_down(MouseButton::Left, |_, window, cx| {
+            window.prevent_default();
+            cx.stop_propagation();
+        })
+        .child(child)
 }
 
 /// Add a button to switch theme (dark/light)
